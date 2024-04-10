@@ -1,0 +1,35 @@
+pkgname=ps5-payload-sdl2_mixer
+pkgver=2.8.0
+pkgrel=1
+pkgdesc="A sample multi-channel audio mixer library."
+arch=('any')
+url="https://github.com/libsdl-org/SDL_mixer"
+license=("zlib")
+options=(!strip libtool staticlibs)
+source=("${url}/releases/download/release-${pkgver}/SDL2_mixer-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk')
+
+depends=(
+  'ps5-payload-sdl2'
+)
+groups=('ps5-payload-dev' 'ps5-payload-sdl2')
+
+build() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd SDL2_mixer-$pkgver
+
+  ./configure --prefix="${PS5_SYSROOT}/usr" --host=x86_64 \
+    --disable-shared --enable-static
+
+  make
+}
+
+package() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd SDL2_mixer-$pkgver
+
+  make DESTDIR="$pkgdir" install
+}
