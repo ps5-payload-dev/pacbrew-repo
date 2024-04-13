@@ -1,0 +1,40 @@
+pkgname=ps5-payload-curl
+pkgver=8.7.1
+pkgrel=1
+pkgdesc='An URL retrieval utility and library'
+arch=('any')
+url='https://curl.haxx.se/'
+license=('curl')
+source=("https://curl.haxx.se/download/curl-${pkgver}.tar.xz")
+sha256sums=('6fea2aac6a4610fbd0400afb0bcddbe7258a64c63f1f68e5855ebc0c659710cd')
+options=(!strip libtool staticlibs)
+depends=('ps5-payload-zlib' 'ps5-payload-mbedtls')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+prepare() {
+  cd curl-$pkgver
+  sed -i 's|define USE_XATTR| |g' src/tool_xattr.h
+}
+
+build() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd curl-$pkgver
+
+  autoreconf -fi
+
+  ./configure --prefix="${PS5_SYSROOT}/usr" --host=x86_64 \
+    --disable-shared --enable-static --with-mbedtls
+
+  make
+
+}
+
+package() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd curl-$pkgver
+
+  make DESTDIR="$pkgdir" install
+}
