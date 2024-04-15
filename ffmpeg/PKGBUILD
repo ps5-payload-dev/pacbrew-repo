@@ -1,0 +1,41 @@
+pkgname=ps5-payload-ffmpeg
+pkgver=7.0
+pkgrel=1
+pkgdesc='ffmpeg port'
+arch=('any')
+url='https://ffmpeg.org/'
+license=('LGPL' 'GPL')
+options=(!strip staticlibs)
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-zlib')
+source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz")
+sha256sums=('4426a94dd2c814945456600c8adfc402bee65ec14a70e8c531ec9a2cd651da7b')
+groups=('ps5-payload-dev')
+
+prepare() {
+  cd ffmpeg-$pkgver
+
+  # FIXME: update freebsd headers to 11.4 which define max_align_t
+  sed -i 's|FFMAX(ALIGN_64, _Alignof(max_align_t))|FFALIGN(sizeof(RefCount), ALIGN_64)|g' libavcodec/refstruct.c
+}
+
+build() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd ffmpeg-$pkgver
+
+  ./configure --prefix="${PS5_SYSROOT}/usr" \
+    --enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero-  \
+    --arch=x86_64 --target-os=freebsd \
+    --disable-shared --enable-static \
+    --cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB
+  make
+}
+
+package() {
+  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+
+  cd ffmpeg-$pkgver
+
+  make DESTDIR="$pkgdir" install
+}
