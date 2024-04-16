@@ -28,8 +28,9 @@ build() {
     --enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero-  \
     --arch=x86_64 --target-os=freebsd \
     --disable-shared --enable-static \
-    --cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB
-  make
+    --disable-debug --disable-doc \
+    --cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB --pkg-config=$PKG_CONFIG
+  make -j $(getconf _NPROCESSORS_ONLN)
 }
 
 package() {
