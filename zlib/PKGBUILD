@@ -1,31 +1,27 @@
-# Maintainer: cpasjuste <cpasjuste@gmail.com>
-
 pkgname=ps5-payload-zlib
 pkgver=1.3.1
 pkgrel=1
 pkgdesc='Deflate compression method library'
-arch=('any')
+arch=('x86_64')
 url='http://www.zlib.net/'
 license=('zlib')
 options=(!strip libtool staticlibs)
 source=("https://zlib.net/zlib-$pkgver.tar.gz")
 sha256sums=('9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23')
-makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
+#makedepends=('ps5-payload-sdk')
 
 build() {
-  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd zlib-$pkgver
 
-  cd zlib-$pkgver
-
-  ./configure --prefix="${PS5_SYSROOT}/usr" --static
-  make
+    ./configure --prefix=${PS5_SYSROOT} --static
+    ${MAKE}
 }
 
 package() {
-  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd zlib-$pkgver
 
-  cd zlib-$pkgver
-
-  make DESTDIR="$pkgdir" install
+    ${MAKE} DESTDIR="$pkgdir" install
 }

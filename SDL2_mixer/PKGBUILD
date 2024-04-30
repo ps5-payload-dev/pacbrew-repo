@@ -2,34 +2,35 @@ pkgname=ps5-payload-sdl2_mixer
 pkgver=2.8.0
 pkgrel=1
 pkgdesc="A sample multi-channel audio mixer library."
-arch=('any')
+arch=('x86_64')
 url="https://github.com/libsdl-org/SDL_mixer"
 license=("zlib")
 options=(!strip libtool staticlibs)
 source=("${url}/releases/download/release-${pkgver}/SDL2_mixer-${pkgver}.tar.gz")
 sha256sums=('SKIP')
-makedepends=('ps5-payload-sdk')
-
-depends=(
-  'ps5-payload-sdl2'
-)
 groups=('ps5-payload-dev' 'ps5-payload-sdl2')
+#makedepends=('ps5-payload-sdk')
 
 build() {
-  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_mixer-$pkgver
 
-  cd SDL2_mixer-$pkgver
-
-  ./configure --prefix="${PS5_SYSROOT}/usr" --host=x86_64 \
-    --disable-shared --enable-static
-
-  make
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DSDL2MIXER_CMD=OFF \
+	     -DSDL2MIXER_OPUS=OFF \
+	     -DSDL2MIXER_MOD=OFF \
+	     -DSDL2MIXER_MIDI_FLUIDSYNTH=OFF \
+	     -DSDL2MIXER_WAVE=OFF \
+	     -DSDL2MIXER_WAVPACK=OFF \
+	     -B build \
+             -S .
+    ${MAKE} -C build
 }
 
 package() {
-  source /opt/pacbrew/ps5/payload-sdk/shell/toolchain.sh
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_mixer-$pkgver
 
-  cd SDL2_mixer-$pkgver
-
-  make DESTDIR="$pkgdir" install
+    ${MAKE} -C build install DESTDIR="$pkgdir"
 }
