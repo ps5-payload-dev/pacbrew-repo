@@ -1,0 +1,34 @@
+pkgname=ps5-payload-bzip2
+pkgver=1.0.8
+pkgrel=1
+pkgdesc="A high-quality data compression program"
+arch=('x86_64')
+license=('BSD')
+url='https://sourceware.org/bzip2'
+options=(!strip libtool staticlibs)
+source=(https://sourceware.org/pub/bzip2/bzip2-$pkgver.tar.gz)
+sha256sums=('ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269')
+groups=('ps5-payload-dev')
+#makedepends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd bzip2-$pkgver
+
+    ${MAKE} libbz2.a bzip2 bzip2recover \
+	    PREFIX="${pkgdir}/${PS5_SYSROOT}" \
+	    CC=${CC} AR=${AR} RANLIB=${RANLIB} LDFLAGS=-lkernel_sys
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd bzip2-$pkgver
+
+    ${MAKE} install PREFIX="${pkgdir}/${PS5_SYSROOT}"
+
+    cd "${pkgdir}/${PS5_SYSROOT}/bin"
+    rm bzless  && ln -s bzmore bzless
+    rm bzegrep && ln -s bzgrep bzegrep
+    rm bzfgrep && ln -s bzgrep bzfgrep
+    rm bzcmp   && ln -s bzdiff bzcmp
+}
