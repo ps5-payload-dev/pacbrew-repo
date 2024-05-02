@@ -1,0 +1,31 @@
+pkgname=ps5-payload-libjpeg-turbo
+pkgver=3.0.2
+pkgrel=1
+pkgdesc='libjpeg derivative with accelerated baseline JPEG compression and decompression'
+arch=('x86_64')
+url='https://github.com/libjpeg-turbo'
+license=('IJG')
+options=(!strip libtool staticlibs)
+source=("https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${pkgver}/libjpeg-turbo-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libjpeg-turbo-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DENABLE_SHARED=OFF \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libjpeg-turbo-$pkgver
+
+    ${MAKE} -C build install DESTDIR="$pkgdir"
+}
