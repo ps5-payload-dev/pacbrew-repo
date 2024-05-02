@@ -10,6 +10,7 @@ source=("https://github.com/hyperrealm/libconfig/releases/download/v$pkgver/libc
 sha256sums=('545166d6cac037744381d1e9cc5a5405094e7bfad16a411699bcff40bbb31ee7')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libcxx')
 
 build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
@@ -17,8 +18,7 @@ build() {
 
     ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
-		--disable-examples --disable-doc \
-		--disable-cxx
+		--disable-examples --disable-doc
     ${MAKE}
 }
 

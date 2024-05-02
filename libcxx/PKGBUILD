@@ -1,0 +1,48 @@
+pkgname=ps5-payload-libcxx
+pkgver=18.1.4
+pkgrel=1
+pkgdesc='LLVM C++ Standard Library'
+arch=('x86_64')
+url='https://libcxx.llvm.org'
+license=('Apache2')
+options=(!strip libtool staticlibs)
+source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-${pkgver}/llvm-project-${pkgver}.src.tar.xz")
+sha256sums=('2c01b2fbb06819a12a92056a7fd4edcdc385837942b5e5260b9c2c0baff5116b')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd llvm-project-$pkgver.src
+
+    ${CMAKE} -S runtimes -B build \
+	     -DCMAKE_INSTALL_PREFIX="${PS5_SYSROOT}" \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
+	     -DLIBCXX_ENABLE_STATIC=YES \
+	     -DLIBCXX_ENABLE_RTTI=YES \
+	     -DLIBCXX_ENABLE_EXCEPTIONS=YES \
+	     -DLIBCXX_ENABLE_SHARED=NO \
+	     -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=NO \
+	     -DLIBCXX_CXX_ABI=libcxxabi \
+	     -DLIBCXXABI_ENABLE_STATIC=YES \
+	     -DLIBCXXABI_ENABLE_EXCEPTIONS=YES \
+	     -DLIBCXXABI_ENABLE_RTTI=YES \
+	     -DLIBCXXABI_ENABLE_THREADS=YES \
+	     -DLIBCXXABI_USE_LLVM_UNWINDER=YES \
+	     -DLIBCXXABI_ENABLE_SHARED=NO \
+	     -DLIBCXXABI_USE_COMPILER_RT=NO \
+	     -DLIBUNWIND_ENABLE_STATIC=YES \
+	     -DLIBUNWIND_ENABLE_THREADS=YES \
+	     -DLIBUNWIND_IS_BAREMETAL=YES \
+	     -DLIBUNWIND_ENABLE_SHARED=NO \
+	     -DLIBUNWIND_USE_COMPILER_RT=NO
+    ${MAKE} -C build
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd llvm-project-$pkgver.src
+
+    ${MAKE} -C build install DESTDIR="${pkgdir}"
+}
