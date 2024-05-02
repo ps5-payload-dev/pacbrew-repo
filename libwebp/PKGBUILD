@@ -1,0 +1,29 @@
+pkgname=ps5-payload-libwebp
+pkgver=1.4.0
+pkgrel=1
+pkgdesc='WebP is a modern image format that provides superior lossless and lossy compression for images on the web.'
+arch=('any')
+url='https://developers.google.com/speed/webp/'
+license=('BSD')
+options=(!strip libtool staticlibs)
+source=("https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$pkgver.tar.gz")
+sha256sums=('61f873ec69e3be1b99535634340d5bde750b2e4447caa1db9f61be3fd49ab1e5')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-zlib')
+groups=('ps5-payload-dev')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libwebp-$pkgver
+
+    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+		--disable-shared --enable-static
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libwebp-$pkgver
+
+    ${MAKE} install DESTDIR="$pkgdir"
+}
