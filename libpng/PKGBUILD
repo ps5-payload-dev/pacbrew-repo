@@ -1,0 +1,31 @@
+pkgname=ps5-payload-libpng
+pkgver=1.6.43
+pkgrel=2
+pkgdesc='PNG format graphic files library'
+arch=('x86_64')
+url='http://www.libpng.org'
+license=('custom')
+options=(!strip libtool staticlibs)
+source=("https://download.sourceforge.net/libpng/libpng-$pkgver.tar.xz")
+sha256sums=('6a5ca0652392a2d7c9db2ae5b40210843c0bbc081cbd410825ab00cc59f14a6c')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-zlib')
+groups=('ps5-payload-dev')
+
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libpng-$pkgver
+
+    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+		--disable-shared --enable-static \
+		--disable-tests
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libpng-$pkgver
+
+    ${MAKE} install DESTDIR="$pkgdir"
+}
