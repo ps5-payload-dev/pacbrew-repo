@@ -10,7 +10,7 @@ sha256sums=('6fea2aac6a4610fbd0400afb0bcddbe7258a64c63f1f68e5855ebc0c659710cd')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 depends=('ps5-payload-zlib' 'ps5-payload-mbedtls')
-#makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk')
 
 prepare() {
     cd curl-$pkgver

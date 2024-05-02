@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://zlib.net/zlib-$pkgver.tar.gz")
 sha256sums=('9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23')
 groups=('ps5-payload-dev')
-#makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk')
 
 build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh

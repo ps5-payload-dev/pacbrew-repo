@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://github.com/Mbed-TLS/mbedtls/releases/download/v${pkgver}/mbedtls-${pkgver}.tar.bz2")
 sha256sums=('241c68402cef653e586be3ce28d57da24598eb0df13fcdea9d99bfce58717132')
 groups=('ps5-payload-dev')
-#makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk')
 
 build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
