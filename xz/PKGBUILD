@@ -7,6 +7,7 @@ url='https://github.com/tukaani-project/xz'
 license=('GPL' 'LGPL' 'custom')
 source=("https://github.com/tukaani-project/xz/releases/download/v${pkgver}/xz-${pkgver}.tar.xz")
 sha256sums=('b92d4e3a438affcf13362a1305cd9d94ed47ddda22e456a42791e630a5644f5c')
+groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
 
