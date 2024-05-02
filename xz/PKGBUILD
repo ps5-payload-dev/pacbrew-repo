@@ -1,0 +1,37 @@
+pkgname=ps5-payload-xz
+pkgver=5.4.6
+pkgrel=1
+pkgdesc='Library and command line tools for XZ and LZMA compressed files'
+arch=('x86_64')
+url='https://github.com/tukaani-project/xz'
+license=('GPL' 'LGPL' 'custom')
+source=("https://github.com/tukaani-project/xz/releases/download/v${pkgver}/xz-${pkgver}.tar.xz")
+sha256sums=('b92d4e3a438affcf13362a1305cd9d94ed47ddda22e456a42791e630a5644f5c')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd xz-$pkgver
+
+    ./autogen.sh
+}
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd xz-$pkgver
+
+    export LDFLAGS="-lkernel_sys"
+    ./configure --prefix=${PS5_SYSROOT} \
+		--host=x86_64 \
+		--disable-nls \
+		--disable-rpath
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd xz-$pkgver
+
+    ${MAKE} install DESTDIR="${pkgdir}"
+}
