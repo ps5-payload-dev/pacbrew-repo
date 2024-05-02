@@ -1,5 +1,5 @@
 pkgname=ps5-payload-libcxx
-pkgver=18.1.4
+pkgver=17.0.6
 pkgrel=1
 pkgdesc='LLVM C++ Standard Library'
 arch=('x86_64')
@@ -7,7 +7,7 @@ url='https://libcxx.llvm.org'
 license=('Apache2')
 options=(!strip libtool staticlibs)
 source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-${pkgver}/llvm-project-${pkgver}.src.tar.xz")
-sha256sums=('2c01b2fbb06819a12a92056a7fd4edcdc385837942b5e5260b9c2c0baff5116b')
+sha256sums=('58a8818c60e6627064f312dbf46c02d9949956558340938b71cf731ad8bc0813')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
