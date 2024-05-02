@@ -18,6 +18,7 @@ build() {
     ${CMAKE} -S runtimes -B build \
 	     -DCMAKE_INSTALL_PREFIX="${PS5_SYSROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_CXX_FLAGS="-nostdlib++" \
 	     -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
 	     -DLIBCXX_ENABLE_STATIC=YES \
 	     -DLIBCXX_ENABLE_RTTI=YES \
