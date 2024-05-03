@@ -1,0 +1,32 @@
+pkgname=ps5-payload-sdl2_ttf
+pkgver=2.22.0
+pkgrel=1
+pkgdesc="SDL2 TrueType font library."
+arch=('x86_64')
+url="https://libsdl.org/projects/SDL_ttf"
+license=("zlib")
+options=(!strip libtool staticlibs)
+source=("${url}/release/SDL2_ttf-${pkgver}.tar.gz")
+sha256sums=('d48cbd1ce475b9e178206bf3b72d56b66d84d44f64ac05803328396234d67723')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-sdl2' 'ps5-payload-freetype')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_ttf-$pkgver
+
+    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+		--disable-shared --enable-static \
+		--disable-freetype-builtin
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_ttf-$pkgver
+
+    ${MAKE} install DESTDIR="$pkgdir"
+
+    echo "Requires.private: freetype2" >> "${pkgdir}/${PS5_SYSROOT}/lib/pkgconfig/SDL2_ttf.pc"
+}
