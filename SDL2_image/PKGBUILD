@@ -31,4 +31,6 @@ package() {
     cd SDL2_image-$pkgver
 
     ${MAKE} install DESTDIR="$pkgdir"
+
+    echo "Requires.private: libpng libjpeg libwebp" >> "${pkgdir}/${PS5_SYSROOT}/lib/pkgconfig/SDL2_image.pc"
 }
