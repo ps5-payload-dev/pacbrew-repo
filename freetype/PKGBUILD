@@ -1,0 +1,32 @@
+pkgname=ps5-payload-freetype
+pkgver=2.13.2
+pkgrel=1
+pkgdesc='FreeType is a freely available software library to render fonts.'
+arch=('x86_64')
+url='https://www.freetype.org/'
+license=(GPL2+ custom:FreeType)
+source=("http://download.savannah.gnu.org/releases/freetype/freetype-$pkgver.tar.gz")
+sha256sums=('1ac27e16c134a7f2ccea177faba19801131116fd682efc1f5737037c5db224b5')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=("ps5-payload-bzip2" "ps5-payload-libpng" "ps5-payload-zlib")
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd freetype-$pkgver
+
+    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+		--disable-shared --enable-static \
+		--enable-freetype-config
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd freetype-$pkgver
+
+    ${MAKE} install DESTDIR="$pkgdir"
+
+    sed 's/\$show_static/yes/' -i "${pkgdir}/${PS5_SYSROOT}/bin/freetype-config"
+}
