@@ -21,6 +21,10 @@ build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd curl-$pkgver
 
+    # Optimizing with default -O2 causes issues at src/tool_operate.c:1157
+    # where outs->stream is set to NULL.
+    export CFLAGS="-O1"
+
     autoreconf -fi
     ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
 		--disable-shared --enable-static --with-mbedtls
