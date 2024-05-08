@@ -17,7 +17,6 @@ build() {
 
     ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
 	     -DCMAKE_BUILD_TYPE=Release \
-	     -DCMAKE_EXE_LINKER_FLAGS="-lkernel_sys" \
 	     -B build \
 	     -S .
     ${MAKE} -C build

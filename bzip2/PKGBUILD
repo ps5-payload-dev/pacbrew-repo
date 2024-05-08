@@ -17,7 +17,7 @@ build() {
 
     ${MAKE} libbz2.a bzip2 bzip2recover \
 	    PREFIX="${pkgdir}/${PS5_SYSROOT}" \
-	    CC=${CC} AR=${AR} RANLIB=${RANLIB} LDFLAGS=-lkernel_sys
+	    CC=${CC} AR=${AR} RANLIB=${RANLIB}
 }
 
 package() {

@@ -22,7 +22,6 @@ build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd xz-$pkgver
 
-    export LDFLAGS="-lkernel_sys"
     ./configure --prefix=${PS5_SYSROOT} \
 		--host=x86_64 \
 		--disable-nls \
