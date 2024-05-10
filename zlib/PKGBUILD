@@ -11,17 +11,35 @@ sha256sums=('9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd zlib-$pkgver/contrib/minizip
+
+    autoreconf --force --verbose --install
+}
+
 build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd zlib-$pkgver
 
     ./configure --prefix=${PS5_SYSROOT} --static
     ${MAKE}
+
+    # libminizip
+    cd contrib/minizip
+    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+		--enable-static --disable-shared
+    ${MAKE}
+
+  make
 }
 
 package() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd zlib-$pkgver
 
+    ${MAKE} DESTDIR="$pkgdir" install
+
+    cd contrib/minizip
     ${MAKE} DESTDIR="$pkgdir" install
 }
