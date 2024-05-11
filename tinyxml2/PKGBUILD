@@ -1,0 +1,30 @@
+pkgname=ps5-payload-tinyxml2
+pkgver=10.0.0
+pkgrel=1
+pkgdesc='A simple, small, efficient, C++ XML parser that can be easily integrated into other programs'
+arch=('x86_64')
+url='http://leethomason.github.io/tinyxml2/'
+license=('apache')
+options=(!strip !debug libtool staticlibs)
+source=( "https://github.com/leethomason/tinyxml2/archive/${pkgver}.tar.gz" )
+sha256sums=('3bdf15128ba16686e69bce256cc468e76c7b94ff2c7f391cc5ec09e40bff3839')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd tinyxml2-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd tinyxml2-$pkgver
+
+    ${MAKE} -C build install DESTDIR="$pkgdir"
+}
