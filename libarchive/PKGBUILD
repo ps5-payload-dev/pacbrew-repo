@@ -20,8 +20,8 @@ build() {
 		--host=x86_64 \
 		--disable-shared --enable-static  \
 		--disable-bsdtar --disable-bsdcat \
-		--without-openssl \
-		--disable-bsdcpio --disable-acl --without-xml2
+		--disable-bsdcpio --disable-acl \
+		--without-openssl --without-xml2
     ${MAKE}
 }
 
