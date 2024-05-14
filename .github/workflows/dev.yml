@@ -38,7 +38,10 @@ jobs:
     - name: Build
       run: |
         bash ci.sh
-        tar -zcf ps5-payload-dev.tar.gz -C /opt/pacprew/ps5/payload-sdk
+
+    - name: Package
+      run: |
+        tar -czf ps5-payload-dev.tar.gz -C / opt/pacbrew/ps5
 
     - name: Upload
       uses: actions/upload-artifact@v3
