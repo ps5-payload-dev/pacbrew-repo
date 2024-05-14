@@ -1,11 +1,11 @@
 pkgname=ps5-payload-sdk
-pkgver=0.13.356b4f38
+pkgver=0.13.git
 pkgrel=1
 pkgdesc="An SDK for PS5 payloads that uses dynamic linking"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/sdk"
-source=('git+https://github.com/ps5-payload-dev/sdk.git#commit=356b4f38')
+source=('git+https://github.com/ps5-payload-dev/sdk.git')
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
 options=(!strip)
