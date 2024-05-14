@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - '**/*.txt'
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - '**/*.txt'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.event_name  }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup
+      run: |
+        sudo apt update
+        sudo apt install build-essential cmake pkg-config clang-15 lld-15
+        wget http://launchpadlibrarian.net/635298936/libalpm13_13.0.2-3_amd64.deb
+        wget http://launchpadlibrarian.net/635298938/pacman-package-manager_6.0.2-3_amd64.deb
+        wget http://launchpadlibrarian.net/635298937/makepkg_6.0.2-3_amd64.deb
+        sudo dpkg -i libalpm13_13.0.2-3_amd64.deb pacman-package-manager_6.0.2-3_amd64.deb makepkg_6.0.2-3_amd64.deb
+        sudo apt-get -y -f install
+
+    - name: Build
+      run: |
+        bash ci.sh
+        tar -zcf ps5-payload-dev.tar.gz -C /opt/pacprew/ps5/payload-sdk
+
+    - name: Upload
+      uses: actions/upload-artifact@v3
+      with:
+        name: ps5-payload-dev
+        path: ./ps5-payload-sdk.tar.gz
+        if-no-files-found: error
+
