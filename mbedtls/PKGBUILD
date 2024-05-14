@@ -17,6 +17,8 @@ build() {
 
     ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
 	     -DCMAKE_BUILD_TYPE=Release \
+	     -DENABLE_TESTING=NO \
+	     -DENABLE_PROGRAMS=NO \
 	     -B build \
 	     -S .
     ${MAKE} -C build
