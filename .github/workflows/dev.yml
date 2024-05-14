@@ -44,6 +44,6 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: ps5-payload-dev
-        path: ./ps5-payload-sdk.tar.gz
+        path: ./ps5-payload-dev.tar.gz
         if-no-files-found: error
 
