@@ -14,9 +14,12 @@ build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd libmicrohttpd-${pkgver}
 
+    # Optimizing with default -O2 causes issues
+    export CFLAGS="-O1"
+ 
     ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
-		--with-threads=posix --disable-curl
+		--disable-curl --disable-examples 
     ${MAKE}
 }
 
