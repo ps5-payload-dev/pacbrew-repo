@@ -11,6 +11,16 @@ sha256sums=('3ecf94fcfdaacafb757786a01b7538a61750ebd85c4b024f56ff8ba1490fcd38')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd mbedtls-$pkgver
+
+    scripts/config.py set MBEDTLS_HAVE_SSE2
+    scripts/config.py set MBEDTLS_THREADING_C
+    scripts/config.py set MBEDTLS_THREADING_PTHREAD
+
+}
+
 build() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd mbedtls-$pkgver
