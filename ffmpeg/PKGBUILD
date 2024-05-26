@@ -2,14 +2,14 @@ pkgname=ps5-payload-ffmpeg
 pkgver=7.0
 pkgrel=1
 pkgdesc='ffmpeg port'
-arch=('any')
+arch=('x86_64')
 url='https://ffmpeg.org'
 license=('LGPL' 'GPL')
 options=(!strip libtool staticlibs)
 source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz")
 sha256sums=('4426a94dd2c814945456600c8adfc402bee65ec14a70e8c531ec9a2cd651da7b')
 groups=('ps5-payload-dev')
-depends=('ps5-payload-zlib')
+depends=('ps5-payload-zlib' 'ps5-payload-mbedtls')
 makedepends=('ps5-payload-sdk')
 
 build() {
@@ -20,6 +20,7 @@ build() {
 	--prefix=${PS5_SYSROOT} \
 	--enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero- \
 	--arch=x86_64 --target-os=freebsd \
+	--enable-mbedtls --enable-version3 \
 	--disable-shared --enable-static \
 	--disable-debug --disable-doc \
 	--cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB \
