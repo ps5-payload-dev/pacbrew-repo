@@ -1,5 +1,5 @@
 pkgname=ps5-payload-ffmpeg
-pkgver=7.0
+pkgver=7.0.1
 pkgrel=1
 pkgdesc='ffmpeg port'
 arch=('x86_64')
