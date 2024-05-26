@@ -1,12 +1,12 @@
 pkgname=ps5-payload-sdl2
-pkgver=2.30.2.233be7d5
+pkgver=2.30.2.80206e65
 pkgrel=1
 pkgdesc='A library for portable low-level access to video, audio, joysticks...'
 arch=('x86_64')
 url='https://libsdl.org'
 license=('LGPL')
 options=(!strip libtool staticlibs)
-source=('git+https://github.com/ps5-payload-dev/SDL.git#commit=233be7d5')
+source=('git+https://github.com/ps5-payload-dev/SDL.git#commit=80206e65')
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-sdl2')
 depends=('ps5-payload-libsamplerate')
