@@ -15,6 +15,7 @@ prepare() {
     source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
     cd mbedtls-$pkgver
 
+    scripts/config.py unset MBEDTLS_SSL_PROTO_TLS1_3
     scripts/config.py set MBEDTLS_HAVE_SSE2
     scripts/config.py set MBEDTLS_THREADING_C
     scripts/config.py set MBEDTLS_THREADING_PTHREAD
