@@ -30,8 +30,6 @@ build() {
     ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
 		--enable-static --disable-shared
     ${MAKE}
-
-  make
 }
 
 package() {
