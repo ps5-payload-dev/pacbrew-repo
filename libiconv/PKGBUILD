@@ -1,0 +1,28 @@
+pkgname=ps5-payload-libiconv
+pkgver=1.17
+pkgrel=1
+pkgdesc='GNU charset conversion library'
+arch=('x86_64')
+url='http://www.gnu.org/software/libiconv/'
+license=('LGPL')
+options=(!strip libtool staticlibs)
+source=("https://ftp.gnu.org/pub/gnu/libiconv/libiconv-$pkgver.tar.gz")
+sha256sums=('8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libiconv-$pkgver
+
+    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+		--enable-static --disable-shared
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libiconv-$pkgver
+
+    ${MAKE} DESTDIR="$pkgdir" install
+}
