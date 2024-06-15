@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 
-PKGS=(sdk libcxx bzip2 zlib mbedtls xz libarchive lua tinyxml2 libiconv
-      libsamplerate SDL2 libpng libjpeg-turbo libwebp freetype libconfig
-      libsodium libogg flac libmagic
-      libmicrohttpd SDL2_mixer SDL2_ttf SDL2_image SDL2_net curl ffmpeg)
+PKGS=(sdk libcxx
+      bzip2 zlib xz libarchive
+      mbedtls
+      libiconv
+      libconfig tinyxml2
+      libmagic libmicrohttpd
+      libpng libjpeg-turbo libwebp
+      freetype
+      libsamplerate libsodium libogg flac
+      SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net
+      lua curl ffmpeg)
 
 sudo pacman --noconfirm --remove ps5-payload-dev
 
