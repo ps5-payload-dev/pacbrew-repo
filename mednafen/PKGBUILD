@@ -1,0 +1,35 @@
+pkgname=ps5-payload-mednafen
+pkgver=1.32.1
+pkgrel=1
+pkgdesc='A portable multi-system emulator'
+arch=('x86_64')
+url='https://mednafen.github.io/'
+license=('GPLv2')
+source=("https://mednafen.github.io/releases/files/mednafen-$pkgver.tar.xz")
+sha256sums=('de7eb94ab66212ae7758376524368a8ab208234b33796625ca630547dbc83832')
+makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-flac')
+groups=('ps5-payload-dev')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd mednafen
+
+    # The SDK libs includes both pthread_setname_np() and pthread_set_name_np(),
+    # but we only have headers for pthread_set_name_np(). Mednafen will default
+    # to pthread_setname_np(), which casuses compiler errors due to missing
+    # declaration in headers. For some reason, defining pthread_setname_np as
+    # a macro causes mednafen to choose pthread_set_name_np() instead.
+    export CXXFLAGS="-Dpthread_setname_np"
+
+    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+		--without-libiconv-prefix \
+		--disable-debugger --disable-nls
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd mednafen
+
+    ${MAKE} DESTDIR="$pkgdir" install
+}
