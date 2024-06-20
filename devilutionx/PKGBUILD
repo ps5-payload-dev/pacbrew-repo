@@ -1,0 +1,45 @@
+pkgname=ps5-payload-devilutionx
+pkgver=1.5.2
+pkgrel=1
+pkgdesc='Diablo build for modern operating systems'
+arch=('x86_64')
+url='https://github.com/diasurgical/devilutionX'
+license=('custom:unlicense')
+source=("https://github.com/diasurgical/devilutionX/releases/download/1.5.2/devilutionx-src.tar.xz")
+sha256sums=('27dc99cb8b40cb6fccbb5935aac7ce0c906664cc3815bcf9e27195747db46ed3')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-libsodium'
+	 'ps5-payload-sdl2')
+
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd devilutionx-src-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DDISCORD_INTEGRATION=OFF \
+	     -DBUILD_TESTING=OFF \
+	     -DASAN=OFF \
+	     -DUBSAN=OFF \
+	     -DDISABLE_LTO=ON \
+	     -DNOEXIT=ON \
+	     -DNONET=ON \
+	     -DBUILD_ASSETS_MPQ=ON \
+	     -DDEVILUTIONX_SYSTEM_SDL_IMAGE=OFF \
+	     -B build \
+	     -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd devilutionx-src-$pkgver/build
+
+    install -Dm755 devilutionx \
+	    "${pkgdir}/${PS5_SYSROOT}/data/homebrew/DevilutionX/devilutionx.elf"
+    install -Dm644 devilutionx.mpq \
+	    "${pkgdir}/${PS5_SYSROOT}/data/homebrew/DevilutionX/devilutionx.mpq"
+}
