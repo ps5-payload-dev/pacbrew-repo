@@ -26,7 +26,7 @@ build() {
 	     -DUBSAN=OFF \
 	     -DDISABLE_LTO=ON \
 	     -DNOEXIT=ON \
-	     -DNONET=ON \
+	     -DNONET=OFF \
 	     -DBUILD_ASSETS_MPQ=ON \
 	     -DDEVILUTIONX_SYSTEM_SDL_IMAGE=OFF \
 	     -B build \
