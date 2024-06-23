@@ -18,7 +18,9 @@ build() {
 
     ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
-		--disable-freetype-builtin
+		--disable-freetype-builtin \
+		--disable-harfbuzz-builtin \
+		--disable-harfbuzz
     ${MAKE}
 }
 
