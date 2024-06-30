@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 PKGS=(sdk libcxx
-      bzip2 zlib xz libarchive
+      bzip2 zlib xz zstd libarchive
       mbedtls
       libiconv
       libconfig tinyxml2
@@ -10,7 +10,8 @@ PKGS=(sdk libcxx
       freetype
       libsamplerate libsodium libogg flac
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net
-      lua curl ffmpeg)
+      lua curl ffmpeg
+      lakesnes mednafen devilutionx)
 
 sudo pacman --noconfirm --remove ps5-payload-dev
 
