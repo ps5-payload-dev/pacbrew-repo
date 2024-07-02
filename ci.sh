@@ -5,7 +5,8 @@ PKGS=(sdk libcxx
       mbedtls
       libiconv
       libconfig tinyxml2
-      libmagic libmicrohttpd
+      #libmagic
+      libmicrohttpd enet
       libpng libjpeg-turbo libwebp
       freetype
       libsamplerate libsodium libogg flac
