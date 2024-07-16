@@ -1,0 +1,32 @@
+pkgname=ps5-payload-json-c
+pkgver=0.17
+pkgrel=1
+pkgdesc="A JSON implementation in C"
+url="https://github.com/json-c/json-c/wiki"
+license=('MIT')
+arch=('x86_64')
+options=(!strip libtool staticlibs)
+source=("https://github.com/json-c/json-c/archive/refs/tags/json-c-0.17-20230812.tar.gz")
+sha256sums=('024d302a3aadcbf9f78735320a6d5aedf8b77876c8ac8bbb95081ca55054c7eb')
+groups=('ps5-payload-dev')
+depends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd json-c-json-c-0.17-20230812
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_C_FLAGS="-Wno-unreachable-code-generic-assoc" \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd json-c-json-c-0.17-20230812
+
+    ${MAKE} -C build install DESTDIR="$pkgdir"
+}
