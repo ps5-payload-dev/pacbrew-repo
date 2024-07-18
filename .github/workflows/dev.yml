@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
 
     - name: Checkout
@@ -23,21 +23,14 @@ jobs:
         sudo apt update
         sudo apt install cmake pkg-config clang-15 lld-15
         sudo apt install build-essential autoconf libtool nasm
-        sudo apt install pkgconf libarchive-tools autopoint po4a git curl doxygen
-        sudo apt install smpq
-        wget http://launchpadlibrarian.net/635298936/libalpm13_13.0.2-3_amd64.deb
-        wget http://launchpadlibrarian.net/635298938/pacman-package-manager_6.0.2-3_amd64.deb
-        wget http://launchpadlibrarian.net/635298937/makepkg_6.0.2-3_amd64.deb
-        sudo dpkg -i libalpm13_13.0.2-3_amd64.deb pacman-package-manager_6.0.2-3_amd64.deb makepkg_6.0.2-3_amd64.deb
-        sudo apt-get -y -f install
+        sudo apt install smpq pkgconf libarchive-tools autopoint po4a git curl doxygen
+        sudo apt install makepkg pacman-package-manager
 
     - name: Build
-      run: |
-        bash ci.sh
+      run: bash ci.sh
 
     - name: Package
-      run: |
-        tar -czf ps5-payload-dev.tar.gz -C / opt/pacbrew/ps5
+      run: tar -czf ps5-payload-dev.tar.gz -C / opt/pacbrew/ps5
 
     - name: Upload
       uses: actions/upload-artifact@v3
