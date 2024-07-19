@@ -19,7 +19,6 @@ prepare() {
     scripts/config.py set MBEDTLS_HAVE_SSE2
     scripts/config.py set MBEDTLS_THREADING_C
     scripts/config.py set MBEDTLS_THREADING_PTHREAD
-
 }
 
 build() {
