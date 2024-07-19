@@ -10,8 +10,8 @@ PKGS=(sdk libcxx
       libpng libjpeg-turbo libwebp
       freetype
       libsamplerate libsodium libogg flac
-      SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net
-      lua curl ffmpeg)
+      SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
+      lua curl ffmpeg SDL2_kitchensink)
 
 sudo pacman --noconfirm --remove ps5-payload-dev
 

@@ -1,0 +1,28 @@
+pkgname=ps5-payload-sdl2_gfx
+pkgver=1.0.4
+pkgrel=1
+pkgdesc="SDL graphics drawing primitives and other support functions (Version 2)"
+url="http://www.ferzkopp.net/wordpress/2016/01/02/sdl_gfx-sdl2_gfx/"
+arch=(x86_64)
+license=(zlib)
+source=("https://www.ferzkopp.net/Software/SDL2_gfx/SDL2_gfx-${pkgver}.tar.gz")
+sha256sums=('63e0e01addedc9df2f85b93a248f06e8a04affa014a835c2ea34bfe34e576262')
+
+depends=('ps5-payload-sdl2')
+groups=('ps5-payload-dev' 'ps5-payload-sdl2')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_gfx-$pkgver
+
+    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+		--disable-shared --enable-static
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd SDL2_gfx-$pkgver
+
+    ${MAKE} DESTDIR="$pkgdir" install
+}
