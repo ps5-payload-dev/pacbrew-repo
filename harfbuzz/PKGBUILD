@@ -1,0 +1,31 @@
+pkgname=ps5-payload-harfbuzz
+pkgver=9.0.0
+pkgrel=1
+arch=('x86_64')
+pkgdesc="OpenType text shaping engine"
+url="https://harfbuzz.github.io/"
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/harfbuzz/harfbuzz/releases/download/$pkgver/harfbuzz-$pkgver.tar.xz")
+sha256sums=('a41b272ceeb920c57263ec851604542d9ec85ee3030506d94662067c7b6ab89e')
+groups=('ps5-payload-dev')
+depends=('ps5-payload-freetype')
+makedepends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd harfbuzz-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd harfbuzz-$pkgver
+
+    ${MAKE} -C build install DESTDIR="$pkgdir"
+}
