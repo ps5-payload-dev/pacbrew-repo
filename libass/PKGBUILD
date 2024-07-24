@@ -1,0 +1,30 @@
+pkgname=ps5-payload-libass
+pkgver=0.17.3
+pkgrel=1
+pkgdesc='A portable subtitle renderer'
+arch=('x86_64')
+url="https://github.com/libass/libass"
+license=('custom: ISC')
+options=(!strip !debug staticlibs)
+source=("https://github.com/libass/libass/releases/download/$pkgver/libass-$pkgver.tar.xz")
+sha256sums=('eae425da50f0015c21f7b3a9c7262a910f0218af469e22e2931462fed3c50959')
+depends=('ps5-payload-libfribidi' 'ps5-payload-freetype' 'ps5-payload-harfbuzz')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libass-$pkgver
+
+    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+		--disable-shared --enable-static \
+		--disable-asm --enable-large-tiles \
+		--disable-require-system-font-provider
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd libass-$pkgver
+    ${MAKE} DESTDIR="$pkgdir" install
+}
