@@ -18,6 +18,7 @@ build() {
 
     ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
 	     -DCMAKE_BUILD_TYPE=Release \
+	     -DHB_HAVE_FREETYPE=YES \
 	     -B build \
              -S .
     ${MAKE} -C build
