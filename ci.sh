@@ -3,7 +3,7 @@
 PKGS=(sdk libcxx
       bzip2 zlib xz zstd libarchive
       mbedtls
-      libiconv
+      libiconv libfribidi
       libconfig json-c tinyxml2
       #libmagic
       libmicrohttpd
