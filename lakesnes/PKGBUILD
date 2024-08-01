@@ -8,7 +8,7 @@ license=('MIT')
 options=(!strip libtool staticlibs)
 source=('git+https://github.com/ps5-payload-dev/LakeSnes.git')
 sha256sums=('SKIP')
-groups=('ps5-payload-dev' 'ps5-payload-sdl2')
+groups=('ps5-payload-dev' 'ps5-payload-game')
 depends=('ps5-payload-sdl2')
 makedepends=('ps5-payload-sdk')
 

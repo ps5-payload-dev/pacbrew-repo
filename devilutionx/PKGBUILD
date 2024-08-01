@@ -8,7 +8,7 @@ license=('custom:unlicense')
 source=("https://github.com/diasurgical/devilutionX/releases/download/1.5.2/devilutionx-src.tar.xz")
 sha256sums=('27dc99cb8b40cb6fccbb5935aac7ce0c906664cc3815bcf9e27195747db46ed3')
 options=(!strip libtool staticlibs)
-groups=('ps5-payload-dev')
+groups=('ps5-payload-dev' 'ps5-payload-game')
 makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-libsodium'
 	 'ps5-payload-sdl2')
