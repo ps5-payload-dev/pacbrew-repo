@@ -1,0 +1,31 @@
+pkgname=ps5-payload-expat
+pkgver=2.6.2
+pkgrel=1
+pkgdesc="An XML parser library"
+arch=('x86_64')
+url="https://libexpat.github.io"
+license=('MIT')
+source=(https://github.com/libexpat/libexpat/releases/download/R_${pkgver//./_}/expat-$pkgver.tar.bz2)
+sha256sums=('9c7c1b5dcbc3c237c500a8fb1493e14d9582146dd9b42aa8d3ffb856a3b927e0')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd expat-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd expat-$pkgver
+
+    ${MAKE} -C build install DESTDIR="$pkgdir"
+}
