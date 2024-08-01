@@ -9,7 +9,8 @@ options=(!strip libtool staticlibs)
 source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz")
 sha256sums=('bce9eeb0f17ef8982390b1f37711a61b4290dc8c2a0c1a37b5857e85bfb0e4ff')
 groups=('ps5-payload-dev')
-depends=('ps5-payload-zlib' 'ps5-payload-mbedtls')
+depends=('ps5-payload-zlib' 'ps5-payload-mbedtls' 'ps5-payload-freetype'
+	 'ps5-payload-libfribidi' 'ps5-payload-harfbuzz' 'ps5-payload-libass')
 makedepends=('ps5-payload-sdk')
 
 build() {
@@ -21,8 +22,10 @@ build() {
 	--enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero- \
 	--arch=x86_64 --target-os=freebsd \
 	--enable-mbedtls --enable-version3 \
+	--enable-libfreetype --enable-libfribidi --enable-libharfbuzz \
 	--disable-shared --enable-static \
 	--disable-debug --disable-doc \
+	--enable-libass \
 	--cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB \
 	--pkg-config=$PKG_CONFIG
     ${MAKE}
