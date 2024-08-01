@@ -1,0 +1,29 @@
+pkgname=ps5-payload-fontconfig
+pkgver=2.15.0
+pkgrel=1
+pkgdesc="Library for configuring and customizing font access"
+url='https://www.freedesktop.org/wiki/Software/fontconfig'
+arch=('x86_64')
+license=('custom')
+options=(!strip libtool staticlibs)
+source=("https://www.freedesktop.org/software/fontconfig/release/fontconfig-$pkgver.tar.gz")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+depends=('ps5-payload-freetype' 'ps5-payload-expat')
+makedepends=('ps5-payload-sdk')
+
+build() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd fontconfig-$pkgver
+
+    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+		--with-default-fonts=/preinst/common/font,/system_ex/common_ex/font2
+    ${MAKE}
+}
+
+package() {
+    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    cd fontconfig-$pkgver
+
+    ${MAKE} install DESTDIR="$pkgdir"
+}

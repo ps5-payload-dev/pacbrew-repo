@@ -8,7 +8,7 @@ PKGS=(sdk libcxx
       #libmagic
       libmicrohttpd
       libpng libjpeg-turbo libwebp
-      freetype harfbuzz
+      freetype harfbuzz fontconfig
       libsamplerate libsodium libogg flac libass
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       lua curl ffmpeg SDL2_kitchensink)
