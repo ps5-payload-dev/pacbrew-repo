@@ -10,23 +10,32 @@ sha256sums=('a89e09fc9b4de34dde19f4fcb4faaa1ce10299b9908db1132bbfa1de47882b94')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libmicrohttpd-${pkgver}
 
     # Optimizing with default -O2 causes issues
     export CFLAGS="-O1"
  
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
-		--disable-curl --disable-examples 
+		--disable-curl --disable-examples
     ${MAKE}
 }
 
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libmicrohttpd-${pkgver}
 
-    ${MAKE} DESTDIR="$pkgdir" install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

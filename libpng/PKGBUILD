@@ -1,6 +1,6 @@
 pkgname=ps5-payload-libpng
 pkgver=1.6.43
-pkgrel=2
+pkgrel=1
 pkgdesc='PNG format graphic files library'
 arch=('x86_64')
 url='http://www.libpng.org'
@@ -12,20 +12,33 @@ makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-zlib')
 groups=('ps5-payload-dev')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libpng-$pkgver
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
 		--disable-tests
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libpng-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    mv "${DESTDIR}/${PS5_HBROOT}/bin/libpng16-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-libpng-config"
+    rm "${DESTDIR}/${PS5_HBROOT}/bin/libpng-config"
 }

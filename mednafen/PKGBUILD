@@ -11,6 +11,10 @@ makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-flac')
 groups=('ps5-payload-dev' 'ps5-payload-game')
 
 prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
     cd mednafen
 
     # The SDK libs includes both pthread_setname_np() and pthread_set_name_np(),
@@ -23,18 +27,18 @@ prepare() {
 }
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mednafen
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--without-libiconv-prefix \
 		--disable-debugger --disable-nls
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mednafen
 
-    ${MAKE} DESTDIR="$pkgdir" install
+    ${MAKE} install DESTDIR="$pkgdir/${PS5_SYSROOT}"
 }

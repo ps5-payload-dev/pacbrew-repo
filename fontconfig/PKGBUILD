@@ -12,18 +12,26 @@ groups=('ps5-payload-dev')
 depends=('ps5-payload-freetype' 'ps5-payload-expat')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd fontconfig-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+		--disable-shared --enable-static \
 		--with-default-fonts=/preinst/common/font,/system_ex/common_ex/font2
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd fontconfig-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

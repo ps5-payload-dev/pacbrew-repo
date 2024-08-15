@@ -11,18 +11,27 @@ sha256sums=('8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libiconv-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--enable-static --disable-shared
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libiconv-$pkgver
 
-    ${MAKE} DESTDIR="$pkgdir" install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

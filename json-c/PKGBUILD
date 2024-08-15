@@ -11,11 +11,17 @@ sha256sums=('024d302a3aadcbf9f78735320a6d5aedf8b77876c8ac8bbb95081ca55054c7eb')
 groups=('ps5-payload-dev')
 depends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd json-c-json-c-0.17-20230812
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DCMAKE_C_FLAGS="-Wno-unreachable-code-generic-assoc" \
 	     -B build \
@@ -25,8 +31,8 @@ build() {
 
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd json-c-json-c-0.17-20230812
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
 }

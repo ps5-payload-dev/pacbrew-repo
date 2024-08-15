@@ -1,0 +1,46 @@
+pkgname=ps5-payload-lbreakouthd
+pkgver=1.1.8
+pkgrel=1
+pkgdesc="Scalable 16:9 remake of LBreakout2"
+arch=('x86_64')
+url="http://lgames.sourceforge.net/LBreakoutHD/"
+license=('GPL3')
+source=("https://downloads.sourceforge.net/project/lgames/lbreakouthd/lbreakouthd-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdl2_ttf' 'ps5-payload-sdl2_image' 'ps5-payload-sdl2_mixer')
+groups=('ps5-payload-dev' 'ps5-payload-game')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lbreakouthd-$pkgver
+
+    sed -i 's|AC_FUNC_MALLOC||g' configure.ac
+    sed -i 's|AC_FUNC_REALLOC||g' configure.ac
+    sed -i 's|SDL_RENDERER_ACCELERATED|SDL_RENDERER_SOFTWARE|g' src/sdl.cpp
+
+    autoreconf -fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lbreakouthd-$pkgver
+
+    export LDFLAGS="$($PS5_PAYLOAD_SDK/bin/prospero-sdl2-config --libs)"
+    export LDFLAGS="$LDFLAGS $($PS5_PAYLOAD_SDK/bin/prospero-libpng-config --libs)"
+    export LDFLAGS="$LDFLAGS $($PS5_PAYLOAD_SDK/bin/prospero-freetype-config --libs)"
+    export LDFLAGS="$LDFLAGS -lwebpdemux -lwebp"
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+		--disable-shared --enable-static
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lbreakouthd-$pkgver
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+}

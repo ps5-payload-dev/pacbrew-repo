@@ -10,12 +10,17 @@ sha256sums=('9c7c1b5dcbc3c237c500a8fb1493e14d9582146dd9b42aa8d3ffb856a3b927e0')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd expat-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -B build \
              -S .
@@ -24,8 +29,8 @@ build() {
 
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd expat-$pkgver
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
 }

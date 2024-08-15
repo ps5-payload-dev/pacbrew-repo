@@ -5,16 +5,21 @@ pkgdesc="An SDK for PS5 payloads that uses dynamic linking"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/sdk"
-source=('git+https://github.com/ps5-payload-dev/sdk.git')
+source=('git+https://github.com/ps5-payload-dev/sdk.git#branch=hbroot')
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
 options=(!strip)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
     make -C sdk
 }
 
 package() {
-    make -C sdk install DESTDIR="${pkgdir}/opt/pacbrew/ps5/payload-sdk"
+    make -C sdk install DESTDIR="${pkgdir}/${PS5_PAYLOAD_SDK}"
 }
-

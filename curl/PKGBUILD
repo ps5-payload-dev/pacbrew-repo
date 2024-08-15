@@ -13,27 +13,39 @@ depends=('ps5-payload-zlib' 'ps5-payload-mbedtls')
 makedepends=('ps5-payload-sdk')
 
 prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
     cd curl-$pkgver
     sed -i 's|define USE_XATTR| |g' src/tool_xattr.h
+    autoreconf -fi
 }
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd curl-$pkgver
 
     # Optimizing with default -O2 causes issues at src/tool_operate.c:1157
     # where outs->stream is set to NULL.
     export CFLAGS="-O1"
 
-    autoreconf -fi
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
-		--disable-shared --enable-static --with-mbedtls
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+		--disable-shared --enable-static --with-mbedtls \
+		--disable-docs
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd curl-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    mv "${DESTDIR}/${PS5_HBROOT}/bin/curl-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-curl-config"
 }

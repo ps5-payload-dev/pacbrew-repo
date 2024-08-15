@@ -7,25 +7,40 @@ url="https://github.com/libass/libass"
 license=('custom: ISC')
 options=(!strip !debug staticlibs)
 source=("https://github.com/libass/libass/releases/download/$pkgver/libass-$pkgver.tar.xz")
-sha256sums=('eae425da50f0015c21f7b3a9c7262a910f0218af469e22e2931462fed3c50959')
+sha256sums=('SKIP')
 depends=('ps5-payload-libfribidi' 'ps5-payload-freetype' 'ps5-payload-harfbuzz'
 	'ps5-payload-fontconfig')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
-build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libass-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    autoreconf -fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libass-$pkgver
+
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
 		--disable-asm --enable-large-tiles \
 		--disable-require-system-font-provider
-    ${MAKE}
+    ${MAKE} V=1
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libass-$pkgver
-    ${MAKE} DESTDIR="$pkgdir" install
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

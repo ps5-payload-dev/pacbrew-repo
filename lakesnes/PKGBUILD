@@ -10,18 +10,24 @@ source=('git+https://github.com/ps5-payload-dev/LakeSnes.git')
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-game')
 depends=('ps5-payload-sdl2')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdl2')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd LakeSnes
     ${MAKE} -f Makefile.prospero
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd LakeSnes
 
     install -Dm755 lakesnes.elf \
-	    "${pkgdir}/${PS5_SYSROOT}/data/homebrew/LakeSnes/lakesnes.elf"
+	    "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin/lakesnes"
 }

@@ -12,22 +12,26 @@ makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-sdl2')
 
 prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
     cd SDL2_net-$pkgver
     sed -i 's|= gethostbyaddr|= NULL; //|g' SDLnet.c
 }
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_net-$pkgver
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_net-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    ${MAKE} install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
 }

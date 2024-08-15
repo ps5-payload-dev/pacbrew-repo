@@ -11,24 +11,26 @@ sha256sums=('ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd bzip2-$pkgver
 
     ${MAKE} libbz2.a bzip2 bzip2recover \
-	    PREFIX="${pkgdir}/${PS5_SYSROOT}" \
 	    CC=${CC} AR=${AR} RANLIB=${RANLIB}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd bzip2-$pkgver
 
-    ${MAKE} install PREFIX="${pkgdir}/${PS5_SYSROOT}"
-
-    cd "${pkgdir}/${PS5_SYSROOT}/bin"
-    rm bzless  && ln -s bzmore bzless
-    rm bzegrep && ln -s bzgrep bzegrep
-    rm bzfgrep && ln -s bzgrep bzfgrep
-    rm bzcmp   && ln -s bzdiff bzcmp
+    install -Dm 644 bzlib.h -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/include"
+    install -Dm 644 libbz2.a -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/lib"
+    install -Dm 755 bzip2 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
+    install -Dm 755 bzip2recover -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
 }

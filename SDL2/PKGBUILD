@@ -12,11 +12,17 @@ groups=('ps5-payload-dev' 'ps5-payload-sdl2')
 depends=('ps5-payload-libsamplerate')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -B build \
              -S .
@@ -24,8 +30,15 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    mv "${DESTDIR}/${PS5_HBROOT}/bin/sdl2-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-sdl2-config"
 }

@@ -10,16 +10,22 @@ source=("https://www.lua.org/ftp/lua-$pkgver.tar.gz")
 sha256sums=('7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88')
 groups=('ps5-payload-dev')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd lua-$pkgver
 
     ${MAKE} generic CC=${CC}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd lua-$pkgver
 
-    ${MAKE} install INSTALL_TOP="$pkgdir/$PS5_SYSROOT"
+    ${MAKE} install INSTALL_TOP="${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}"
 }

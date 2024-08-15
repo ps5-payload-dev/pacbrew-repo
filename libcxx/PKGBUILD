@@ -11,8 +11,14 @@ sha256sums=('58a8818c60e6627064f312dbf46c02d9949956558340938b71cf731ad8bc0813')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd llvm-project-$pkgver.src
 
     ${CMAKE} -S runtimes -B build \
@@ -42,7 +48,7 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd llvm-project-$pkgver.src
 
     ${MAKE} -C build install DESTDIR="${pkgdir}"

@@ -12,9 +12,11 @@ groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
 prepare() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
-    cd mbedtls-$pkgver
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
 
+    cd mbedtls-$pkgver
     scripts/config.py unset MBEDTLS_SSL_PROTO_TLS1_3
     scripts/config.py set MBEDTLS_HAVE_SSE2
     scripts/config.py set MBEDTLS_THREADING_C
@@ -22,10 +24,10 @@ prepare() {
 }
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mbedtls-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DENABLE_TESTING=NO \
 	     -DENABLE_PROGRAMS=NO \
@@ -35,8 +37,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mbedtls-$pkgver
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
 }

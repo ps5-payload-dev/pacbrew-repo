@@ -11,11 +11,17 @@ sha256sums=('3bdf15128ba16686e69bce256cc468e76c7b94ff2c7f391cc5ec09e40bff3839')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd tinyxml2-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -B build \
              -S .
@@ -23,8 +29,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd tinyxml2-$pkgver
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
 }

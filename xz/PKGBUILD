@@ -12,26 +12,31 @@ makedepends=('ps5-payload-sdk')
 
 
 prepare() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
-    cd xz-$pkgver
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
 
+    cd xz-$pkgver
     ./autogen.sh
 }
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd xz-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} \
-		--host=x86_64 \
-		--disable-nls \
-		--disable-rpath
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+		--disable-shared --enable-static \
+		--disable-nls --disable-rpath \
+		--disable-scripts
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd xz-$pkgver
 
-    ${MAKE} install DESTDIR="${pkgdir}"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

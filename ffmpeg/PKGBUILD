@@ -13,12 +13,18 @@ depends=('ps5-payload-zlib' 'ps5-payload-mbedtls' 'ps5-payload-freetype'
 	 'ps5-payload-libfribidi' 'ps5-payload-harfbuzz' 'ps5-payload-libass')
 makedepends=('ps5-payload-sdk')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd ffmpeg-$pkgver
 
     ./configure \
-	--prefix=${PS5_SYSROOT} \
+	--prefix="${PS5_HBROOT}" \
 	--enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero- \
 	--arch=x86_64 --target-os=freebsd \
 	--enable-mbedtls --enable-version3 \
@@ -32,8 +38,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd ffmpeg-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    ${MAKE} install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
 }

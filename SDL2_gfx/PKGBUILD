@@ -11,18 +11,24 @@ sha256sums=('63e0e01addedc9df2f85b93a248f06e8a04affa014a835c2ea34bfe34e576262')
 depends=('ps5-payload-sdl2')
 groups=('ps5-payload-dev' 'ps5-payload-sdl2')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_gfx-$pkgver
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_gfx-$pkgver
 
-    ${MAKE} DESTDIR="$pkgdir" install
+    ${MAKE} DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
 }

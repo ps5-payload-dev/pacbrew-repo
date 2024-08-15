@@ -15,22 +15,27 @@ depends=('ps5-payload-sdl2'
 	 'ps5-payload-libjpeg-turbo'
 	 'ps5-payload-libwebp')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_image-$pkgver
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
-		--with-sdl-prefix="${PS5_SYSROOT}" \
-		--disable-jpg-shared --disable-png-shared --disable-webp-shared
+		--disable-jpg-shared --disable-png-shared \
+		--disable-webp-shared
     ${MAKE}
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_image-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
-
-    echo "Requires.private: libpng libjpeg libwebpdemux libwebp" >> "${pkgdir}/${PS5_SYSROOT}/lib/pkgconfig/SDL2_image.pc"
+    export DESTDIR="$pkgdir/${PS5_SYSROOT}"
+    ${MAKE} install
 }

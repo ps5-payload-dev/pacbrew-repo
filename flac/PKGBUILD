@@ -11,11 +11,17 @@ options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx' 'ps5-payload-libogg')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd flac-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--enable-static --disable-shared \
 		--disable-xmms-plugin --enable-cpplibs \
 		--disable-thorough-tests --disable-oggtest
@@ -24,11 +30,14 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd flac-$pkgver
 
-    ${MAKE} -C src/libFLAC DESTDIR="$pkgdir" install
-    ${MAKE} -C include/FLAC DESTDIR="$pkgdir" install
-    ${MAKE} -C include/FLAC++ DESTDIR="$pkgdir" install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} -C src/libFLAC install
+    ${MAKE} -C include/FLAC install
+    ${MAKE} -C include/FLAC++ install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }
 

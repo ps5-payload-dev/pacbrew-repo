@@ -14,11 +14,17 @@ depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-libsodium'
 	 'ps5-payload-sdl2')
 
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd devilutionx-src-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DDISCORD_INTEGRATION=OFF \
 	     -DBUILD_TESTING=OFF \
@@ -35,11 +41,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd devilutionx-src-$pkgver/build
 
-    install -Dm755 devilutionx \
-	    "${pkgdir}/${PS5_SYSROOT}/data/homebrew/DevilutionX/devilutionx.elf"
-    install -Dm644 devilutionx.mpq \
-	    "${pkgdir}/${PS5_SYSROOT}/data/homebrew/DevilutionX/devilutionx.mpq"
+    ${MAKE} install DESTDIR="$pkgdir/${PS5_SYSROOT}"
 }

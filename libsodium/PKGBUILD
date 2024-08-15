@@ -11,19 +11,28 @@ sha256sums=('018d79fe0a045cca07331d37bd0cb57b2e838c51bc48fd837a1472e50068bbea')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libsodium-stable
 
-    ./configure --prefix=${PS5_SYSROOT} --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
   		--disable-shared --enable-static
     ${MAKE}
 }
 
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libsodium-stable
 
-    make DESTDIR="$pkgdir" install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

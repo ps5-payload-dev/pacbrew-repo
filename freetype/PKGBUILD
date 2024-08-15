@@ -12,11 +12,16 @@ groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 depends=("ps5-payload-bzip2" "ps5-payload-libpng" "ps5-payload-zlib")
 
+
+prepare() {
+    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd freetype-$pkgver
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static \
 		--with-zlib=yes \
 		--with-bzip2=yes \
@@ -27,10 +32,15 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd freetype-$pkgver
 
-    ${MAKE} install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
 
-    sed 's/\$show_static/yes/' -i "${pkgdir}/${PS5_SYSROOT}/bin/freetype-config"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    mv "${DESTDIR}/${PS5_HBROOT}/bin/freetype-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-freetype-config"
 }

@@ -9,15 +9,20 @@ options=(!strip libtool staticlibs)
 source=("http://www.libarchive.org/downloads/libarchive-${pkgver}.tar.gz")
 sha256sums=('7875d49596286055b52439ed42f044bd8ad426aa4cc5aabd96bfe7abb971d5e8')
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
-depends=('ps5-payload-xz')
+makedepends=('ps5-payload-sdk' 'ps5-payload-bzip2' 'ps5-payload-zlib'
+	     'ps5-payload-zstd' 'ps5-payload-xz' )
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libarchive-$pkgver
 
-    ./configure --prefix=${PS5_SYSROOT} \
-		--host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
 		--disable-shared --enable-static  \
 		--disable-bsdtar --disable-bsdcat \
 		--disable-bsdcpio --disable-acl \
@@ -26,9 +31,12 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libarchive-$pkgver
 
-    make install DESTDIR="$pkgdir"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }
 

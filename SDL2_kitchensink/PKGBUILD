@@ -11,12 +11,17 @@ groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-sdl2' 'ps5-payload-ffmpeg' 'ps5-payload-libass')
 
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
 
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL_kitchensink-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DBUILD_SHARED=NO \
 	     -B build \
@@ -25,8 +30,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL_kitchensink-$pkgver
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
 }

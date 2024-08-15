@@ -11,11 +11,15 @@ sha256sums=('SKIP')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
+prepare() {
+    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+}
+
 build() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libjpeg-turbo-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX=${PS5_SYSROOT} \
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DENABLE_SHARED=OFF \
 	     -B build \
@@ -24,8 +28,8 @@ build() {
 }
 
 package() {
-    source /opt/pacbrew/ps5/payload-sdk/toolchain/prospero.sh
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libjpeg-turbo-$pkgver
 
-    ${MAKE} -C build install DESTDIR="$pkgdir"
+    ${MAKE} -C build install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
 }
