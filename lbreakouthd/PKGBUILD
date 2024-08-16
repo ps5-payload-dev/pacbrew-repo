@@ -29,11 +29,9 @@ build() {
     cd lbreakouthd-$pkgver
 
     export LDFLAGS="$($PS5_PAYLOAD_SDK/bin/prospero-sdl2-config --libs)"
-    export LDFLAGS="$LDFLAGS $($PS5_PAYLOAD_SDK/bin/prospero-libpng-config --libs)"
     export LDFLAGS="$LDFLAGS $($PS5_PAYLOAD_SDK/bin/prospero-freetype-config --libs)"
     export LDFLAGS="$LDFLAGS -lwebpdemux -lwebp"
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
     ${MAKE}
 }
 

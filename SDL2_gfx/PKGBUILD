@@ -21,8 +21,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_gfx-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
     ${MAKE}
 }
 
@@ -30,5 +29,8 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_gfx-$pkgver
 
-    ${MAKE} DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

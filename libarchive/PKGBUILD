@@ -23,7 +23,6 @@ build() {
     cd libarchive-$pkgver
 
     ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static  \
 		--disable-bsdtar --disable-bsdcat \
 		--disable-bsdcpio --disable-acl \
 		--without-openssl --without-xml2

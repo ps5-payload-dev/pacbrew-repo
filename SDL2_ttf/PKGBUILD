@@ -24,7 +24,6 @@ build() {
 
     # harfbuzz is currently crashing when used with SDL2_ttf
     ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static \
 		--disable-freetype-builtin \
 		--disable-harfbuzz-builtin \
 		--disable-harfbuzz
@@ -35,6 +34,8 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_ttf-$pkgver
 
-    export DESTDIR="$pkgdir/${PS5_SYSROOT}"
-    ${MAKE} install
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

@@ -21,7 +21,6 @@ build() {
     cd fontconfig-$pkgver
 
     ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static \
 		--with-default-fonts=/preinst/common/font,/system_ex/common_ex/font2
     ${MAKE}
 }

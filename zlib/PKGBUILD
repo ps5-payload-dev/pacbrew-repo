@@ -24,13 +24,12 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd zlib-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --static
+    ./configure --prefix="${PS5_HBROOT}"
     ${MAKE}
 
     # libminizip
     cd contrib/minizip
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--enable-static --disable-shared
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
     ${MAKE}
 }
 

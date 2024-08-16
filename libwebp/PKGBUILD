@@ -20,8 +20,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libwebp-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
     ${MAKE}
 }
 

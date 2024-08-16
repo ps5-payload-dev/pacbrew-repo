@@ -21,22 +21,16 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_mixer-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
-	     -DSDL2MIXER_CMD=OFF \
-	     -DSDL2MIXER_OPUS=OFF \
-	     -DSDL2MIXER_MOD=OFF \
-	     -DSDL2MIXER_MIDI_FLUIDSYNTH=OFF \
-	     -DSDL2MIXER_WAVE=OFF \
-	     -DSDL2MIXER_WAVPACK=OFF \
-	     -B build \
-             -S .
-    ${MAKE} -C build
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
+    ${MAKE}
 }
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL2_mixer-$pkgver
 
-    ${MAKE} -C build install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

@@ -13,7 +13,6 @@ makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-libsodium'
 	 'ps5-payload-sdl2')
 
-
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk

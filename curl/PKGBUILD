@@ -31,7 +31,7 @@ build() {
     export CFLAGS="-O1"
 
     ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
-		--disable-shared --enable-static --with-mbedtls \
+		--with-mbedtls \
 		--disable-docs
     ${MAKE}
 }

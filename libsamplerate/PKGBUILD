@@ -21,19 +21,16 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libsamplerate-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-             -DCMAKE_BUILD_TYPE=Release \
-             -DBUILD_TESTING=NO \
-             -DBUILD_SHARED_LIBS=OFF \
-             -Wno-dev \
-             -B build \
-             -S .
-    ${MAKE} -C build
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
+    ${MAKE}
 }
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libsamplerate-$pkgver
 
-    ${MAKE} -C build install DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }
