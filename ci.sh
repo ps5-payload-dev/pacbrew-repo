@@ -12,7 +12,6 @@ PKGS=(sdk libcxx
       libsamplerate libsodium libogg flac libass
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       lua curl ffmpeg SDL2_kitchensink
-      lakesnes lbreakouthd devilutionx mednafen
      )
 
 sudo pacman --noconfirm --remove ps5-payload-dev
