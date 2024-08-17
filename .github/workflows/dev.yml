@@ -22,7 +22,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt install cmake pkg-config clang-15 lld-15
-        sudo apt install build-essential autoconf libtool nasm
+        sudo apt install build-essential autoconf libtool yasm nasm
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager
 

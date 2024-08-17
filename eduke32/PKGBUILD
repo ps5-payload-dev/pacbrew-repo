@@ -1,0 +1,44 @@
+pkgname=ps5-payload-eduke32
+pkgver=20240725
+pkgrel=1
+pkgdesc="An advanced Duke Nukem 3D source port"
+arch=('x86_64')
+url="http://eduke32.com/"
+license=('GPL')
+source=("http://dukeworld.duke4.net/eduke32/synthesis/20240725-10593-19c21b9ab/eduke32_src_20240725-10593-19c21b9ab.tar.xz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdl2' 'ps5-payload-flac') # 'ps5-payload-libvorbis')
+groups=('ps5-payload-dev' 'ps5-payload-game')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd eduke32_20240725-10593-19c21b9ab
+    sed -i 's|#include <malloc.h>|#include <stdlib.h>|g' source/build/include/compat.h
+    sed -i 's|-fuse-ld=lld||g' Common.mak
+    sed -i 's|-lexecinfo||g' GNUmakefile
+    sed -i 's|define PRINTSTACKONSEGV 1||g' source/build/src/sdlayer.cpp
+    sed -i 's|pthread_get_name_np|//|g' source/build/src/loguru.cpp
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd eduke32_20240725-10593-19c21b9ab
+
+    CFLAGS="$($PS5_PAYLOAD_SDK/bin/prospero-sdl2-config --cflags)"
+    LDFLAGS="$($PS5_PAYLOAD_SDK/bin/prospero-sdl2-config --libs)"
+    ${MAKE} PRETTY_OUTPUT=0 USE_OPENGL=0 HAVE_GTK2=0 \
+	    USE_MIMALLOC=0 PLATFORM=BSD LTO=0 \
+	    SDLCONFIG="${PS5_PAYLOAD_SDK}/bin/prospero-sdl2-config" \
+	    CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd eduke32_20240725-10593-19c21b9ab
+
+    install -Dm 755 eduke32 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
+    install -Dm 755 mapster32 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
+}
