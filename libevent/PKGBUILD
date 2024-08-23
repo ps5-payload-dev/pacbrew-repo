@@ -1,0 +1,39 @@
+pkgname=ps5-payload-libevent
+pkgver=2.1.12
+pkgrel=1
+pkgdesc="Event notification library"
+url="https://libevent.org/"
+arch=('x86_64')
+license=('BSD')
+
+source=(https://github.com/libevent/libevent/releases/download/release-${pkgver}-stable/libevent-${pkgver}-stable.tar.gz)
+sha256sums=('92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk' 'ps5-payload-zlib')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libevent-${pkgver}-stable
+
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-openssl
+    ${MAKE} V=1
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libevent-${pkgver}-stable
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+}
