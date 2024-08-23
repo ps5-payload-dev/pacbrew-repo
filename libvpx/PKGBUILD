@@ -1,0 +1,42 @@
+pkgname=ps5-payload-libvpx
+pkgver=1.14.1
+pkgrel=1
+pkgdesc='VP8 and VP9 codec'
+arch=(x86_64)
+url=https://www.webmproject.org/
+license=(custom:BSD)
+options=(!strip libtool staticlibs)
+source=("https://chromium.googlesource.com/webm/libvpx/+archive/v1.14.1.tar.gz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+
+    ./configure --prefix="${PS5_HBROOT}" --target=generic-gnu \
+		--enable-static --disable-shared \
+		--disable-install-docs --disable-install-srcs \
+		--disable-unit-tests \
+		--enable-postproc \
+		--enable-vp8 --enable-vp9 \
+		--enable-vp9-highbitdepth \
+		--enable-vp9-temporal-denoising \
+		--as=yasm
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+}
