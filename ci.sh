@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 
 PKGS=(sdk libcxx
-      bzip2 zlib xz zstd libarchive
+      bzip2 zlib xz zstd libarchive libdeflate
       mbedtls
-      libiconv libfribidi
+      libevent libiconv libfribidi
       libconfig json-c tinyxml2 expat
+      miniupnpc
       file
       libmicrohttpd
       libpng libjpeg-turbo libwebp
       freetype harfbuzz fontconfig
-      libsamplerate libsodium libogg flac libass
+      libsamplerate libsodium libogg flac
+      libass
+      libvpx
+      enet
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       lua curl ffmpeg SDL2_kitchensink
      )
