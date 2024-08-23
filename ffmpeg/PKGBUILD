@@ -26,6 +26,7 @@ build() {
     ./configure \
 	--prefix="${PS5_HBROOT}" \
 	--enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero- \
+	--enable-static --disable-shared \
 	--arch=x86_64 --target-os=freebsd \
 	--enable-mbedtls --enable-version3 \
 	--enable-libfreetype --enable-libfribidi --enable-libharfbuzz \

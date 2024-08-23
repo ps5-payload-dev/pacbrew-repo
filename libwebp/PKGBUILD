@@ -2,7 +2,7 @@ pkgname=ps5-payload-libwebp
 pkgver=1.4.0
 pkgrel=1
 pkgdesc='WebP is a modern image format that provides superior lossless and lossy compression for images on the web.'
-arch=('any')
+arch=('x86_64')
 url='https://developers.google.com/speed/webp/'
 license=('BSD')
 options=(!strip libtool staticlibs)
@@ -13,14 +13,17 @@ depends=('ps5-payload-zlib')
 groups=('ps5-payload-dev')
 
 prepare() {
-    export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
 }
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libwebp-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared
     ${MAKE}
 }
 
@@ -29,7 +32,7 @@ package() {
     cd libwebp-$pkgver
 
     export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
-    make install
+    ${MAKE} install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
 }

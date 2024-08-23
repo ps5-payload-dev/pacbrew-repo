@@ -23,6 +23,7 @@ build() {
 
     ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
 	     -DCMAKE_BUILD_TYPE=Release \
+	     -DBUILD_STATIC=YES \
 	     -DBUILD_SHARED=NO \
 	     -B build \
              -S .

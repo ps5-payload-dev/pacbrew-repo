@@ -30,7 +30,8 @@ build() {
     # where outs->stream is set to NULL.
     export CFLAGS="-O1"
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
 		--with-mbedtls \
 		--disable-docs
     ${MAKE}

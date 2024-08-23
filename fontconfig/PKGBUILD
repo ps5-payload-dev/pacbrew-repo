@@ -20,7 +20,8 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd fontconfig-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
 		--with-default-fonts=/preinst/common/font,/system_ex/common_ex/font2
     ${MAKE}
 }

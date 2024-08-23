@@ -23,7 +23,8 @@ build() {
     cd SDL2_ttf-$pkgver
 
     # harfbuzz is currently crashing when used with SDL2_ttf
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
 		--disable-freetype-builtin \
 		--disable-harfbuzz-builtin \
 		--disable-harfbuzz

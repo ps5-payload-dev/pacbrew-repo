@@ -21,7 +21,8 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd freetype-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
 		--with-zlib=yes \
 		--with-bzip2=yes \
 		--with-png=yes \
