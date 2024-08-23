@@ -1,0 +1,42 @@
+pkgname=ps5-payload-libdeflate
+pkgver=1.19
+pkgrel=1
+pkgdesc='Heavily optimized library for DEFLATE/zlib/gzip compression and decompression'
+arch=('x86_64')
+url='https://github.com/ebiggers/libdeflate'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/ebiggers/libdeflate/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libdeflate-$pkgver
+
+    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DLIBDEFLATE_BUILD_STATIC_LIB=YES \
+	     -DLIBDEFLATE_BUILD_SHARED_LIB=NO \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libdeflate-$pkgver
+
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+}
