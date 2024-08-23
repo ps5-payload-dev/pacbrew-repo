@@ -1,0 +1,37 @@
+pkgname=ps5-payload-miniupnpc
+pkgver=2.2.4
+pkgrel=1
+pkgdesc='Small UPnP client library/tool to access Internet Gateway Devices'
+url='https://miniupnp.tuxfamily.org/'
+arch=('x86_64')
+license=('BSD')
+source=(https://miniupnp.tuxfamily.org/files/miniupnpc-${pkgver}.tar.gz)
+
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    cd miniupnpc-${pkgver}
+    sed -i 's|$(shell $(CC) -dumpmachine)|x86_64-pc-freebsd|g' Makefile
+    export INSTALLPREFIX="${PS5_HBROOT}"
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd miniupnpc-${pkgver}
+
+    ${MAKE} build/libminiupnpc.a build/miniupnpc.pc
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd miniupnpc-$pkgver
+
+    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    ${MAKE} install OS=amiga # :D
+}
