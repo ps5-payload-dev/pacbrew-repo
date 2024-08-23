@@ -23,7 +23,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd enet-${pkgver}
 
-    ./configure --prefix="${PS5_SYSROOT}" --host=x86_64-pc-freebsd \
+    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
 		--disable-shared --enable-static 
     ${MAKE}
 }
