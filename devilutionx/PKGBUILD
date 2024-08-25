@@ -23,8 +23,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd devilutionx-src-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DDISCORD_INTEGRATION=OFF \
 	     -DBUILD_TESTING=OFF \
 	     -DASAN=OFF \
@@ -43,5 +42,9 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd devilutionx-src-$pkgver/build
 
-    ${MAKE} install DESTDIR="$pkgdir/${PS5_SYSROOT}"
+    mkdir -p       "$pkgdir/${DESTDIR}/${PREFIX}/bin/"
+    mv devilutionx "$pkgdir/${DESTDIR}/${PREFIX}/bin/"
+
+    mkdir -p           "$pkgdir/${DESTDIR}/${PREFIX}/share/devilutionx/"
+    mv devilutionx.mpg "$pkgdir/${DESTDIR}/${PREFIX}/share/devilutionx/"
 }

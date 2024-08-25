@@ -21,8 +21,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd json-c-json-c-0.17-20230812
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DCMAKE_C_FLAGS="-Wno-unreachable-code-generic-assoc" \
 	     -B build \
              -S .

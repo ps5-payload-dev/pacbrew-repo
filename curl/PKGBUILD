@@ -30,7 +30,7 @@ build() {
     # where outs->stream is set to NULL.
     export CFLAGS="-O1"
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--with-mbedtls \
 		--disable-docs
@@ -41,12 +41,12 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd curl-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
-    make install
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PS5_HBROOT}/bin/curl-config" \
+    mv "${DESTDIR}/${PREFIX}/bin/curl-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-curl-config"
 }

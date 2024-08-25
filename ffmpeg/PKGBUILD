@@ -24,16 +24,16 @@ build() {
     cd ffmpeg-$pkgver
 
     ./configure \
-	--prefix="${PS5_HBROOT}" \
-	--enable-cross-compile --cross-prefix=${PS5_PAYLOAD_SDK}/bin/prospero- \
+	--prefix="${PREFIX}" --enable-cross-compile \
+	--cross-prefix="${PS5_PAYLOAD_SDK}/bin/prospero-" \
 	--enable-static --disable-shared \
 	--arch=x86_64 --target-os=freebsd \
 	--enable-mbedtls --enable-version3 \
 	--enable-libfreetype --enable-libfribidi --enable-libharfbuzz \
 	--disable-debug --disable-doc \
 	--enable-libass \
-	--cc=$CC --cxx=$CXX --nm=$NM --strip=$STRIP --ar=$AR --ranlib=$RANLIB \
-	--pkg-config=$PKG_CONFIG
+	--cc="${CC}" --cxx="${CXX}" --nm="${NM}" --strip="${STRIP}" \
+	--ar="${AR}" --ranlib="${RANLIB}" --pkg-config="${PKG_CONFIG}"
     ${MAKE}
 }
 
@@ -41,8 +41,8 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd ffmpeg-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
-    make install
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }

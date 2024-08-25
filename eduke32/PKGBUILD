@@ -39,6 +39,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd eduke32_20240725-10593-19c21b9ab
 
-    install -Dm 755 eduke32 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
-    install -Dm 755 mapster32 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
+    install -Dm 755 eduke32 -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+    install -Dm 755 mapster32 -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
 }

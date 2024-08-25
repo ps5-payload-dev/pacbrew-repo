@@ -22,7 +22,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libpng-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64-pc-freebsd \
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--disable-tests
     ${MAKE}
@@ -32,13 +32,13 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libpng-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PS5_HBROOT}/bin/libpng16-config" \
+    mv "${DESTDIR}/${PREFIX}/bin/libpng16-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-libpng-config"
-    rm "${DESTDIR}/${PS5_HBROOT}/bin/libpng-config"
+    rm "${DESTDIR}/${PREFIX}/bin/libpng-config"
 }

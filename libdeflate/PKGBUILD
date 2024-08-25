@@ -20,8 +20,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libdeflate-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DLIBDEFLATE_BUILD_STATIC_LIB=YES \
 	     -DLIBDEFLATE_BUILD_SHARED_LIB=NO \
 	     -B build \
@@ -35,8 +34,8 @@ package() {
     cd libdeflate-$pkgver
 
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} -C build install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }

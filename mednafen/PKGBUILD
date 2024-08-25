@@ -30,7 +30,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mednafen
 
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64 \
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--without-libiconv-prefix \
 		--disable-debugger --disable-nls
     ${MAKE}
@@ -40,5 +40,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mednafen
 
-    ${MAKE} install DESTDIR="$pkgdir/${PS5_SYSROOT}"
+    export DESTDIR="$pkgdir/${DESTDIR}"
+    ${MAKE} install
 }

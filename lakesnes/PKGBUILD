@@ -29,5 +29,5 @@ package() {
     cd LakeSnes
 
     install -Dm755 lakesnes \
-	    "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin/lakesnes"
+	    "${pkgdir}/${DESTDIR}/${PREFIX}/bin/lakesnes"
 }

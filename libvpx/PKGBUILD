@@ -20,7 +20,7 @@ prepare() {
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
 
-    ./configure --prefix="${PS5_HBROOT}" --target=generic-gnu \
+    ./configure --prefix="${PREFIX}" --target=generic-gnu \
 		--enable-static --disable-shared \
 		--disable-install-docs --disable-install-srcs \
 		--disable-unit-tests \
@@ -35,8 +35,8 @@ build() {
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }

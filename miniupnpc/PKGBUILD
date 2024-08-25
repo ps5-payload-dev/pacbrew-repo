@@ -18,13 +18,13 @@ prepare() {
     fi
     cd miniupnpc-${pkgver}
     sed -i 's|$(shell $(CC) -dumpmachine)|x86_64-pc-freebsd|g' Makefile
-    export INSTALLPREFIX="${PS5_HBROOT}"
 }
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd miniupnpc-${pkgver}
 
+    export INSTALLPREFIX="${PREFIX}"
     ${MAKE} build/libminiupnpc.a build/miniupnpc.pc
 }
 
@@ -32,6 +32,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd miniupnpc-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} install OS=amiga # :D
 }

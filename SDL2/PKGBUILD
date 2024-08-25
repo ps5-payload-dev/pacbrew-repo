@@ -22,8 +22,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -B build \
              -S .
     ${MAKE} -C build
@@ -33,12 +32,12 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd SDL
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} -C build install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PS5_HBROOT}/bin/sdl2-config" \
+    mv "${DESTDIR}/${PREFIX}/bin/sdl2-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-sdl2-config"
 }

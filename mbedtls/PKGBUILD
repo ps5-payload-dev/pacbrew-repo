@@ -27,8 +27,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mbedtls-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DENABLE_TESTING=NO \
 	     -DENABLE_PROGRAMS=NO \
 	     -B build \

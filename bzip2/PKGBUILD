@@ -29,8 +29,8 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd bzip2-$pkgver
 
-    install -Dm 644 bzlib.h -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/include"
-    install -Dm 644 libbz2.a -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/lib"
-    install -Dm 755 bzip2 -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
-    install -Dm 755 bzip2recover -t "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/bin"
+    install -Dm 644 bzlib.h -t "${pkgdir}/${DESTDIR}/${PREFIX}/include"
+    install -Dm 644 libbz2.a -t "${pkgdir}/${DESTDIR}/${PREFIX}/lib"
+    install -Dm 755 bzip2 -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+    install -Dm 755 bzip2recover -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
 }

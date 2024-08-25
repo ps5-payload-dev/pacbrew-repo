@@ -24,12 +24,12 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd zlib-$pkgver
 
-    ./configure --prefix="${PS5_HBROOT}"
+    ./configure --prefix="${PREFIX}"
     ${MAKE}
 
     # libminizip
     cd contrib/minizip
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
+    ./configure --prefix="${PREFIX}" --host=x86_64
     ${MAKE}
 }
 
@@ -37,11 +37,11 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd zlib-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} install
 
     cd contrib/minizip
     ${MAKE} install
 
-    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PS5_HBROOT}"
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }

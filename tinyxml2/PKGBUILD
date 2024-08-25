@@ -21,8 +21,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd tinyxml2-$pkgver
 
-    ${CMAKE} -DCMAKE_INSTALL_PREFIX="${PS5_HBROOT}" \
-	     -DCMAKE_BUILD_TYPE=Release \
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -B build \
              -S .
     ${MAKE} -C build
@@ -32,5 +31,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd tinyxml2-$pkgver
 
-    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
 }

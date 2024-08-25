@@ -31,7 +31,7 @@ build() {
     export LDFLAGS="$($PS5_PAYLOAD_SDK/bin/prospero-sdl2-config --libs)"
     export LDFLAGS="$LDFLAGS $($PS5_PAYLOAD_SDK/bin/prospero-freetype-config --libs)"
     export LDFLAGS="$LDFLAGS -lwebpdemux -lwebp"
-    ./configure --prefix="${PS5_HBROOT}" --host=x86_64
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd
     ${MAKE}
 }
 
@@ -39,6 +39,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd lbreakouthd-$pkgver
 
-    export DESTDIR="${pkgdir}/${PS5_SYSROOT}"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
     make install
 }
