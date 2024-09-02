@@ -1,0 +1,40 @@
+pkgname=ps5-payload-sqlite
+pkgver=3.46.1
+pkgrel=1
+pkgdesc="A C library that implements an SQL database engine"
+arch=('x86_64')
+license=('LicenseRef-Sqlite')
+url="https://www.sqlite.org/"
+options=(!strip libtool staticlibs)
+source=(https://www.sqlite.org/2024/sqlite-src-3460100.zip)
+sha256sums=('SKIP')
+
+groups=('ps5-payload-dev')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd sqlite-src-3460100
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared
+    ${MAKE} sqlite3.h libsqlite3.la
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd sqlite-src-3460100
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make lib_install
+    install -d "${DESTDIR}/${PREFIX}/include/"
+    install -m 0644 sqlite3.h "${DESTDIR}/${PREFIX}/include/"
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
