@@ -1,0 +1,31 @@
+pkgname=ps5-payload-klogsrv
+pkgver=0.4.1
+pkgrel=1
+pkgdesc="A socket server for /dev/klog"
+arch=('x86_64')
+license=('GPLv3')
+url="https://github.com/ps5-payload-dev/klogsrv"
+source=("git+https://github.com/ps5-payload-dev/klogsrv.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd klogsrv
+
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd klogsrv
+
+    install -Dm 755 klogsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+}

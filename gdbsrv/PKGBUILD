@@ -1,0 +1,31 @@
+pkgname=ps5-payload-gdbsrv
+pkgver=0.3
+pkgrel=1
+pkgdesc="A GDB server to PS5 payloads"
+arch=('x86_64')
+license=('GPLv3')
+url="https://github.com/ps5-payload-dev/gdbsrv"
+source=("git+https://github.com/ps5-payload-dev/gdbsrv.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd gdbsrv
+
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd gdbsrv
+
+    install -Dm 755 gdbsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+}

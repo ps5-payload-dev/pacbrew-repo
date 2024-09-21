@@ -1,0 +1,33 @@
+pkgname=ps5-payload-offact
+pkgver=master.git
+pkgrel=1
+pkgdesc="PS5 offline account activation"
+arch=('x86_64')
+license=('GPLv3')
+url="https://github.com/ps5-payload-dev/offact"
+source=("git+https://github.com/ps5-payload-dev/offact.git#branch=master")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev' 'ps5-payload-game')
+options=(!strip libtool staticlibs)
+makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2_ttf' 'ps5-payload-sdl2_mixer')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd offact
+
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd offact
+
+    mv OffAct.elf offact
+    install -Dm 755 offact -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+}

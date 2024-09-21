@@ -1,0 +1,31 @@
+pkgname=ps5-payload-shsrv
+pkgver=0.10.1
+pkgrel=1
+pkgdesc="A telnet-like shell server for jailbroken PS5s that accepts connections on port 2323"
+arch=('x86_64')
+license=('GPLv3')
+url="https://github.com/ps5-payload-dev/shsrv"
+source=("git+https://github.com/ps5-payload-dev/shsrv.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd shsrv
+
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd shsrv
+
+    install -Dm 755 shsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+}

@@ -1,0 +1,31 @@
+pkgname=ps5-payload-elfldr
+pkgver=0.14.1
+pkgrel=1
+pkgdesc="An ELF loader for jailbroken PS5s"
+arch=('x86_64')
+license=('GPLv3')
+url="https://github.com/ps5-payload-dev/elfldr"
+source=("git+https://github.com/ps5-payload-dev/elfldr.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd elfldr
+
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd elfldr
+
+    install -Dm 755 elfldr.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+}
