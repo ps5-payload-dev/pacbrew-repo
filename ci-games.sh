@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-PKGS=(lakesnes eduke32 lbreakouthd devilutionx mednafen)
+PKGS=(offact lakesnes fbneo eduke32 devilutionx mednafen lbreakouthd)
 
 sudo pacman --noconfirm --remove ps5-payload-game
 
