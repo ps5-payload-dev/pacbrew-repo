@@ -1,0 +1,33 @@
+pkgname=ps5-payload-fbneo
+pkgver=git
+pkgrel=1
+pkgdesc="FinalBurn Neo"
+arch=('x86_64')
+license=('custom')
+url="https://github.com/ps5-payload-dev/FBNeo"
+source=("git+https://github.com/ps5-payload-dev/FBNeo.git#branch=ps5")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-sdl2_image')
+groups=('ps5-payload-dev' 'ps5-payload-game')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd FBNeo
+
+    ${MAKE} sdl2
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd FBNeo
+
+    mkdir -p "$pkgdir/${DESTDIR}/${PREFIX}/bin/"
+    mv fbneo "$pkgdir/${DESTDIR}/${PREFIX}/bin/"
+}
