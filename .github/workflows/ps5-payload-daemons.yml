@@ -52,7 +52,7 @@ jobs:
       run: pacman --info -Q > version-info.txt
 
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: ps5-payload-daemons
         path: |
