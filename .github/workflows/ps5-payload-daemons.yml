@@ -1,0 +1,56 @@
+name: PS5 Payload Daemons
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.event_name  }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup
+      run: |
+        sudo apt update
+        sudo apt install build-essential clang-15 lld-15
+        sudo apt install makepkg pacman-package-manager
+
+    - name: Build sdk
+      run: cd sdk && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build elfldr
+      run: cd elfldr && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build ftpsrv
+      run: cd ftpsrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build klogsrv
+      run: cd klogsrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build shsrv
+      run: cd shsrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build gdbsrv
+      run: cd gdbsrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build libmicrohttpd
+      run: cd libmicrohttpd && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build websrv
+      run: cd websrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Upload
+      uses: actions/upload-artifact@v3
+      with:
+        name: ps5-payload-daemons
+        path: /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.elf
+        if-no-files-found: error
