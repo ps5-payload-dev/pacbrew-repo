@@ -22,7 +22,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt install build-essential clang-15 lld-15
-        sudo apt install makepkg pacman-package-manager
+        sudo apt install git curl libarchive-tools makepkg pacman-package-manager
 
     - name: Build sdk
       run: cd sdk && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
