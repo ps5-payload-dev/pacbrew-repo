@@ -26,13 +26,13 @@ jobs:
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager
 
-    - name: Build
+    - name: Build SDK
       run: bash ci.sh
 
-    - name: Package
+    - name: Package SDK
       run: tar -czf ps5-payload-dev.tar.gz -C / opt/ps5-payload-sdk
 
-    - name: Upload
+    - name: Upload SDK
       uses: actions/upload-artifact@v3
       with:
         name: ps5-payload-dev
