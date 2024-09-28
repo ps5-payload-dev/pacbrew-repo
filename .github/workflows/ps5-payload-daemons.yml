@@ -49,13 +49,11 @@ jobs:
       run: cd websrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
     - name: Generate Version Info
-      run: pacman --info -Q > version-info.txt
+      run: sudo pacman --info -Q > /opt/ps5-payload-sdk/target/user/homebrew/sbin/version-info.txt
 
     - name: Upload
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ps5-payload-daemons
-        path: |
-          /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.elf
-          version-info.txt
+        path: /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.*
         if-no-files-found: error
