@@ -39,3 +39,9 @@ jobs:
         path: ./ps5-payload-dev.tar.gz
         if-no-files-found: error
 
+    - name: Upload Payload Daemons
+      uses: actions/upload-artifact@v3
+      with:
+        name: ps5-payload-daemons
+        path: /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.elf
+        if-no-files-found: error
