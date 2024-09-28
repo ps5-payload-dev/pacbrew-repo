@@ -1,5 +1,5 @@
 pkgname=ps5-payload-elfldr
-pkgver=0.14.1
+pkgver=0.17
 pkgrel=1
 pkgdesc="An ELF loader for jailbroken PS5s"
 arch=('x86_64')

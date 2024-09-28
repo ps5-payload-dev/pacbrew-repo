@@ -1,5 +1,5 @@
 pkgname=ps5-payload-sdk
-pkgver=0.16.1
+pkgver=0.17
 pkgrel=1
 pkgdesc="An SDK for PS5 payloads that uses dynamic linking"
 arch=('x86_64')

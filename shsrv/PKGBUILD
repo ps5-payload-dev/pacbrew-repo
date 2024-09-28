@@ -1,5 +1,5 @@
 pkgname=ps5-payload-shsrv
-pkgver=0.10.1
+pkgver=0.11
 pkgrel=1
 pkgdesc="A telnet-like shell server for jailbroken PS5s that accepts connections on port 2323"
 arch=('x86_64')

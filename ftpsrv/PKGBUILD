@@ -1,5 +1,5 @@
 pkgname=ps5-payload-ftpsrv
-pkgver=0.10.1
+pkgver=0.10.2
 pkgrel=1
 pkgdesc="An FTP server for jailbroken PS5s that accepts connections on port 2121"
 arch=('x86_64')
