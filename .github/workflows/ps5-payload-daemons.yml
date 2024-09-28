@@ -49,7 +49,7 @@ jobs:
       run: cd websrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
     - name: Generate Version Info
-      run: sudo pacman --info -Q > /opt/ps5-payload-sdk/target/user/homebrew/sbin/version-info.txt
+      run: pacman --info -Q > version-info.txt && sudo mv version-info.txt /opt/ps5-payload-sdk/target/user/homebrew/sbin/
 
     - name: Upload
       uses: actions/upload-artifact@v4
