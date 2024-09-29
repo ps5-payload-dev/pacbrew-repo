@@ -1,0 +1,32 @@
+pkgname=ps5-payload-bearssl
+pkgver=0.6
+pkgrel=1
+pkgdesc='Implementation of the SSL/TLS protocol (RFC 5246) written in C'
+arch=('x86_64')
+url='https://bearssl.org'
+license=('MIT')
+source=("https://www.bearssl.org/bearssl-$pkgver.tar.gz")
+sha256sums=('6705bba1714961b41a728dfc5debbe348d2966c117649392f8c8139efc83ff14')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd bearssl-$pkgver
+
+    ${MAKE} CC=${CC} LD=${CC} build/brssl build/libbearssl.a
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd bearssl-$pkgver
+
+    install -vDm755 -t "${pkgdir}/${PS5_SYSROOT}/${PREFIX}/bin" build/brssl
+    install -vDm644 -t "${pkgdir}/${PS5_SYSROOT}/${PREFIX}/include" inc/*.h
+    install -vDm644 -t "${pkgdir}/${PS5_SYSROOT}/${PREFIX}/lib" build/libbearssl.a
+}
