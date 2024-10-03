@@ -1,0 +1,41 @@
+pkgname=ps5-payload-libyuv
+pkgver=r2426+464c51a0
+pkgrel=1
+pkgdesc="Library for YUV scaling"
+arch=(x86_64)
+url="https://chromium.googlesource.com/libyuv/libyuv/"
+license=(custom)
+_commit=464c51a0353c71f08fe45f683d6a97a638d47833
+source=(git+${url}#commit=${_commit})
+sha256sums=(SKIP)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    sed -i '33s/^/#/' libyuv/CMakeLists.txt
+    sed -i '34s/^/#/' libyuv/CMakeLists.txt
+    sed -i '35s/^/#/' libyuv/CMakeLists.txt
+    sed -i '51s/^/#/' libyuv/CMakeLists.txt
+    sed -i '96s/^/#/' libyuv/CMakeLists.txt
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libyuv
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+	     -S .
+    ${MAKE} -C build yuv
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libyuv
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
