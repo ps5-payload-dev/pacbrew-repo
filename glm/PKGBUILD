@@ -1,0 +1,39 @@
+pkgname=ps5-payload-glm
+pkgver=1.0.1
+pkgrel=1
+pkgdesc="C++ mathematics library for 3D software based on the OpenGL Shading Language (GLSL) specification"
+arch=('x86_64')
+license=('MIT')
+url="http://glm.g-truc.net"
+source=("https://github.com/g-truc/glm/archive/refs/tags/${pkgver}.tar.gz")
+sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd glm-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DGLM_BUILD_TESTS=NO \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd glm-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
