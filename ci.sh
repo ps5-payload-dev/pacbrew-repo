@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-PKGS=(sdk libcxx
+PKGS=(sdk libcxx fast_float
       elfldr ftpsrv gdbsrv klogsrv shsrv
       bzip2 zlib xz zstd libarchive libdeflate
       mbedtls bearssl
