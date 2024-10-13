@@ -1,0 +1,44 @@
+pkgname=ps5-payload-libsndfile
+pkgver=1.2.2
+pkgrel=1
+pkgdesc="A C library for reading and writing files containing sampled audio data"
+arch=(x86_64)
+url="https://libsndfile.github.io/libsndfile/"
+license=(LGPL-2.1-or-later)
+source=("https://github.com/libsndfile/libsndfile/releases/download/$pkgver/libsndfile-$pkgver.tar.xz")
+sha256sums=('3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-flac'
+	 'ps5-payload-lame'
+	 'ps5-payload-libogg'
+	 'ps5-payload-libvorbis'
+	 'ps5-payload-mpg123'
+	 'ps5-payload-opus')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libsndfile-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-full-suite
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libsndfile-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}

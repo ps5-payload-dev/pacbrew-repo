@@ -12,7 +12,7 @@ PKGS=(sdk libcxx
       libpng libjpeg-turbo libwebp
       freetype harfbuzz fontconfig
       libsamplerate libsodium libogg libvorbis flac opus
-      mpg123 lame
+      mpg123 lame libsndfile
       libass
       libvpx
       enet
