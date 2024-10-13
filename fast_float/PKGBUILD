@@ -1,0 +1,38 @@
+pkgname=ps5-payload-fast_float
+pkgver=6.1.6
+pkgrel=1
+pkgdesc='Fast and exact implementation of the C++ from_chars functions for float and double types'
+arch=('x86_64')
+url="https://github.com/fastfloat/fast_float"
+license=('Apache-2.0 OR BSL-1.0 OR MIT')
+source=("$url/archive/v$pkgver.tar.gz")
+sha256sums=('4458aae4b0eb55717968edda42987cabf5f7fc737aee8fede87a70035dba9ab0')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd fast_float-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd fast_float-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
