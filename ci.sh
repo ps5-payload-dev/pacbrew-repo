@@ -11,7 +11,7 @@ PKGS=(sdk libcxx
       sqlite libmicrohttpd websrv
       libpng libjpeg-turbo libwebp
       freetype harfbuzz fontconfig
-      libsamplerate libsodium libogg libvorbis flac opus
+      libsamplerate libsodium libogg libvorbis flac opus mpg123
       libass
       libvpx
       enet

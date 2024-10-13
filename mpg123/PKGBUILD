@@ -1,0 +1,39 @@
+pkgname=ps5-payload-mpg123
+pkgver=1.32.7
+pkgrel=1
+pkgdesc='Console based real time MPEG Audio Player for Layer 1, 2 and 3'
+url='https://mpg123.de'
+arch=('x86_64')
+license=('LGPL2.1')
+source=("https://downloads.sourceforge.net/sourceforge/mpg123/mpg123-${pkgver}.tar.bz2")
+sha256sums=('3c8919243707951cac0e3c39bbf28653bcaffc43c98ff16801a27350db8f0f21')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd mpg123-${pkgver}
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-components --enable-libmpg123
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd mpg123-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
+
