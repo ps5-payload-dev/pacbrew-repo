@@ -1,0 +1,37 @@
+pkgname=ps5-payload-jansson
+pkgver=2.14
+pkgrel=1
+pkgdesc='C library for encoding, decoding and manipulating JSON data'
+arch=('x86_64')
+url='https://www.digip.org/jansson/'
+license=('MIT')
+source=("https://github.com/akheron/jansson/releases/download/v$pkgver/jansson-$pkgver.tar.gz")
+sha256sums=('5798d010e41cf8d76b66236cfb2f2543c8d082181d16bc3085ab49538d4b9929')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd jansson-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd jansson-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
