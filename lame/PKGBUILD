@@ -1,0 +1,39 @@
+pkgname=ps5-payload-lame
+pkgver=3.100
+pkgrel=1
+pkgdesc='A high quality MPEG Audio Layer III (MP3) encoder'
+arch=('x86_64')
+url='http://lame.sourceforge.net'
+license=('LGPL')
+source=("https://downloads.sourceforge.net/lame/lame-$pkgver.tar.gz")
+sha256sums=('ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lame-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-frontend --enable-nasm
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lame-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
+
