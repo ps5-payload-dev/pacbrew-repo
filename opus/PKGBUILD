@@ -1,0 +1,37 @@
+pkgname=ps5-payload-opus
+pkgver=1.5.2
+pkgrel=1
+pkgdesc='Totally open, royalty-free, highly versatile audio codec'
+arch=('x86_64')
+url='https://www.opus-codec.org'
+license=('BSD-3-Clause')
+source=("https://downloads.xiph.org/releases/opus/opus-$pkgver.tar.gz")
+sha256sums=('65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd opus-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd opus-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
