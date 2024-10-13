@@ -5,7 +5,7 @@ PKGS=(sdk libcxx fast_float
       bzip2 zlib xz zstd libarchive libdeflate
       mbedtls bearssl
       libevent libiconv libfribidi
-      libconfig json-c tinyxml2 expat
+      libconfig json-c tinyxml2 expat jansson
       miniupnpc
       file
       sqlite libmicrohttpd websrv
