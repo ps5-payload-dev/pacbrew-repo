@@ -41,4 +41,8 @@ package() {
     ${MAKE} install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    ln -s "../target/${PREFIX}/bin/wolfssl-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-wolfssl-config"
 }
