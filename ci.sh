@@ -12,7 +12,7 @@ PKGS=(sdk libcxx fast_float
       libpng libjpeg-turbo libwebp giflib
       freetype harfbuzz fontconfig
       libsamplerate libsodium libogg libvorbis flac opus
-      mpg123 lame libmad libsndfile
+      mpg123 lame libmad a52dec faad2 libsndfile
       libass
       libvpx libmpeg2 libtheora
       enet
