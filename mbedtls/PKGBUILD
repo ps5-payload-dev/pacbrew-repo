@@ -1,13 +1,13 @@
 pkgname=ps5-payload-mbedtls
-pkgver=3.6.0
+pkgver=3.6.2
 pkgrel=1
 pkgdesc='An open source, portable, easy to use, readable and flexible SSL library'
 arch=('x86_64')
 url='https://tls.mbed.org'
 license=('Apache2')
 options=(!strip libtool staticlibs)
-source=("https://github.com/Mbed-TLS/mbedtls/releases/download/v${pkgver}/mbedtls-${pkgver}.tar.bz2")
-sha256sums=('3ecf94fcfdaacafb757786a01b7538a61750ebd85c4b024f56ff8ba1490fcd38')
+source=("https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${pkgver}/mbedtls-${pkgver}.tar.bz2")
+sha256sums=('8b54fb9bcf4d5a7078028e0520acddefb7900b3e66fec7f7175bb5b7d85ccdca')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
@@ -17,7 +17,6 @@ prepare() {
     fi
 
     cd mbedtls-$pkgver
-    scripts/config.py unset MBEDTLS_SSL_PROTO_TLS1_3
     scripts/config.py set MBEDTLS_HAVE_SSE2
     scripts/config.py set MBEDTLS_THREADING_C
     scripts/config.py set MBEDTLS_THREADING_PTHREAD
