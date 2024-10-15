@@ -1,0 +1,39 @@
+pkgname=ps5-payload-faad2
+pkgver=2.11.1
+pkgrel=1
+pkgdesc="Freeware Advanced Audio (AAC) Decoder"
+arch=('x86_64')
+url="https://github.com/knik0/faad2"
+license=('GPL-2.0-or-later')
+source=("$url/archive/$pkgver.tar.gz")
+sha256sums=('72dbc0494de9ee38d240f670eccf2b10ef715fd0508c305532ca3def3225bb06')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd faad2-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd faad2-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
