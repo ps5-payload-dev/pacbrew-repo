@@ -1,0 +1,52 @@
+pkgname=ps5-payload-scummvm
+pkgver=2.8.1
+pkgrel=1
+pkgdesc="A 'virtual machine' for several classic graphical point-and-click adventure games."
+arch=('x86_64')
+license=('GPL')
+url="http://www.scummvm.org/"
+source=("https://downloads.scummvm.org/frs/scummvm/${pkgver}/scummvm-${pkgver}.tar.xz")
+sha256sums=('7e97f4a13d22d570b70c9b357c941999be71deb9186039c87d82bbd9c20727b7')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev' 'ps5-payload-game')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libpng' 'ps5-payload-libtheora' 'ps5-payload-sdl2'
+	 'ps5-payload-sdl2_net' 'ps5-payload-flac' 'ps5-payload-libvorbis'
+	 'ps5-payload-libmad' 'ps5-payload-freetype' 'ps5-payload-libmpeg2'
+	 'ps5-payload-curl' 'ps5-payload-giflib' 'ps5-payload-libjpeg-turbo'
+	 'ps5-payload-faad2' 'ps5-payload-a52dec')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd scummvm-${pkgver}
+
+    export PKG_CONFIG_DIR=
+    export PKG_CONFIG_SYSROOT_DIR=${PS5_PAYLOAD_SDK}/target
+    export PKG_CONFIG_LIBDIR=${PKG_CONFIG_SYSROOT_DIR}/user/homebrew/lib/pkgconfig
+    export PKG_CONFIG_PATH=${PKG_CONFIG_SYSROOT_DIR}/user/homebrew/libdata/pkgconfig
+    
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --enable-release --enable-all-engines \
+		--with-sdl-prefix="${PS5_PAYLOAD_SDK}/target/user/homebrew/bin" \
+		--with-libcurl-prefix="${PS5_PAYLOAD_SDK}/target/user/homebrew/bin" \
+		--with-freetype2-prefix="${PS5_PAYLOAD_SDK}/target/user/homebrew/bin" \
+		--enable-vkeybd
+    ${MAKE}
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd scummvm-${pkgver}
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
