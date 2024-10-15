@@ -1,0 +1,44 @@
+pkgname=ps5-payload-wolfssl
+pkgver=5.7.2
+pkgrel=1
+pkgdesc="Lightweight, portable, C-language-based SSL/TLS library"
+arch=('x86_64')
+url="https://www.wolfssl.com"
+license=("GPL-2.0-or-later")
+source=("https://github.com/wolfssl/wolfssl/archive/refs/tags/v$pkgver-stable.tar.gz")
+sha256sums=('0f2ed82e345b833242705bbc4b08a2a2037a33f7bf9c610efae6464f6b10e305')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd wolfssl-$pkgver-stable
+
+    ./autogen.sh
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd wolfssl-$pkgver-stable
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--enable-opensslextra
+    ${MAKE}
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd wolfssl-$pkgver-stable
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
