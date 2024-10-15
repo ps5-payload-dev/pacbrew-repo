@@ -38,6 +38,6 @@ package() {
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PREFIX}/bin/sdl2-config" \
+    ln -s "../target/${PREFIX}/bin/sdl2-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-sdl2-config"
 }

@@ -47,6 +47,6 @@ package() {
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PREFIX}/bin/curl-config" \
+    ln -s "../target/${PREFIX}/bin/curl-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-curl-config"
 }

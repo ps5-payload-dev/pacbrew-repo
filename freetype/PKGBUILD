@@ -41,6 +41,6 @@ package() {
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
-    mv "${DESTDIR}/${PREFIX}/bin/freetype-config" \
+    ln -s "../target/${PREFIX}/bin/freetype-config" \
        "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-freetype-config"
 }
