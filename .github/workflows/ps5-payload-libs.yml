@@ -26,22 +26,15 @@ jobs:
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager
 
-    - name: Build SDK
+    - name: Build Libs
       run: bash ci-libs.sh
 
-    - name: Package SDK
-      run: tar -czf ps5-payload-dev.tar.gz -C / opt/ps5-payload-sdk
+    - name: Package Libs
+      run: tar -czf ps5-payload-libs.tar.gz -C / opt/ps5-payload-sdk
 
-    - name: Upload SDK
+    - name: Upload Libs
       uses: actions/upload-artifact@v3
       with:
-        name: ps5-payload-dev
-        path: ./ps5-payload-dev.tar.gz
-        if-no-files-found: error
-
-    - name: Upload Payload Daemons
-      uses: actions/upload-artifact@v3
-      with:
-        name: ps5-payload-daemons
-        path: /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.elf
+        name: ps5-payload-libs
+        path: ./ps5-payload-libs.tar.gz
         if-no-files-found: error
