@@ -9,12 +9,12 @@ PKGS=(sdk libcxx fast_float
       miniupnpc
       file
       sqlite libmicrohttpd websrv
-      libpng libjpeg-turbo libwebp
+      libpng libjpeg-turbo libwebp giflib
       freetype harfbuzz fontconfig
       libsamplerate libsodium libogg libvorbis flac opus
-      mpg123 lame libsndfile
+      mpg123 lame libmad libsndfile
       libass
-      libvpx
+      libvpx libmpeg2 libtheora
       enet
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       imgui lua curl ffmpeg SDL2_kitchensink
