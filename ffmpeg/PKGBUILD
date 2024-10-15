@@ -6,8 +6,10 @@ arch=('x86_64')
 url='https://ffmpeg.org'
 license=('LGPL' 'GPL')
 options=(!strip libtool staticlibs)
-source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz")
-sha256sums=('bce9eeb0f17ef8982390b1f37711a61b4290dc8c2a0c1a37b5857e85bfb0e4ff')
+source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz"
+	"fftools-ffplay-add-basic-support-for-game-controller-input.diff")
+sha256sums=('bce9eeb0f17ef8982390b1f37711a61b4290dc8c2a0c1a37b5857e85bfb0e4ff'
+	   '0ad5ccf47158fe56a5d94a87b2307841f129bd68bd2e1b99b5903468dffb83cb')
 groups=('ps5-payload-dev')
 depends=('ps5-payload-zlib' 'ps5-payload-mbedtls' 'ps5-payload-freetype'
 	 'ps5-payload-libfribidi' 'ps5-payload-harfbuzz' 'ps5-payload-libass')
@@ -17,6 +19,8 @@ prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
+    cd ffmpeg-$pkgver
+    patch -p1 < ../../fftools-ffplay-add-basic-support-for-game-controller-input.diff
 }
 
 build() {
