@@ -3,7 +3,7 @@
 PKGS=(sdk libcxx fast_float
       elfldr ftpsrv gdbsrv klogsrv shsrv
       bzip2 zlib xz zstd libarchive libdeflate
-      mbedtls bearssl
+      mbedtls bearssl wolfssl
       libevent libiconv libfribidi
       libconfig json-c tinyxml2 expat jansson
       miniupnpc
