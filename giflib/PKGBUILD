@@ -1,0 +1,36 @@
+pkgname=ps5-payload-giflib
+pkgver=5.2.2
+pkgrel=1
+pkgdesc='Library for reading and writing gif images'
+url='http://giflib.sourceforge.net/'
+arch=('x86_64')
+license=('MIT')
+source=("https://downloads.sourceforge.net/project/giflib/giflib-${pkgver}.tar.gz")
+sha256sums=('be7ffbd057cadebe2aa144542fd90c6838c6a083b5e8a9048b8ee3b66b29d5fb')
+groups=('ps5-payload-dev')
+options=(!strip libtool staticlibs)
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd giflib-${pkgver}
+
+    ${MAKE} libgif.a
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd giflib-${pkgver}
+
+    export DESTDIR="${pkgdir}/${DESTDIR}/${PREFIX}"
+    install -d "${DESTDIR}/lib"
+    install -d "${DESTDIR}/include"
+    install -m 644 libgif.a "${DESTDIR}/lib"
+    install -m 644 gif_lib.h "${DESTDIR}/include"
+}
