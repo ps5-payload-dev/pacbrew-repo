@@ -7,13 +7,15 @@ url='https://bearssl.org'
 license=('MIT')
 source=("https://www.bearssl.org/bearssl-$pkgver.tar.gz")
 sha256sums=('6705bba1714961b41a728dfc5debbe348d2966c117649392f8c8139efc83ff14')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
 }
-
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
