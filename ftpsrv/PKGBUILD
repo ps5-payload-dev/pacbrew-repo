@@ -7,8 +7,9 @@ license=('GPLv3')
 url="https://github.com/ps5-payload-dev/ftpsrv"
 source=("git+https://github.com/ps5-payload-dev/ftpsrv.git#tag=v${pkgver}")
 sha256sums=('SKIP')
-groups=('ps5-payload-dev')
+groups=('ps5-payload-dev' 'ps5-payload-daemon')
 options=(!strip libtool staticlibs)
+makedepends=('ps5-payload-sdk')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

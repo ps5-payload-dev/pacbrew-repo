@@ -7,7 +7,9 @@ license=('GPLv3')
 url="https://github.com/ps5-payload-dev/websrv"
 source=("git+https://github.com/ps5-payload-dev/websrv.git#tag=v${pkgver}")
 sha256sums=('SKIP')
-groups=('ps5-payload-dev')
+groups=('ps5-payload-dev' 'ps5-payload-daemon')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libmicrohttpd')
 options=(!strip libtool staticlibs)
 
 prepare() {
