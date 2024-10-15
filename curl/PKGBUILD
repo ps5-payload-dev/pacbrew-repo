@@ -26,6 +26,9 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd curl-$pkgver
 
+    # Fetch CA bundle
+    ./scripts/mk-ca-bundle.pl
+
     # Optimizing with default -O2 causes issues at src/tool_operate.c:1157
     # where outs->stream is set to NULL.
     export CFLAGS="-O1"
@@ -33,6 +36,7 @@ build() {
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--without-libpsl --with-wolfssl \
+		--with-ca-bundle="${PREFIX}/etc/ca-bundle.crt" \
 		--disable-docs
     ${MAKE}
 }
@@ -45,6 +49,9 @@ package() {
     ${MAKE} install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+
+    mkdir -p "${DESTDIR}/${PREFIX}/etc"
+    cp ca-bundle.crt "${DESTDIR}/${PREFIX}/etc"
 
     mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
     ln -s "../target/${PREFIX}/bin/curl-config" \
