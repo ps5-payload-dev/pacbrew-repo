@@ -1,0 +1,41 @@
+pkgname=ps5-payload-libtheora
+pkgver=1.1.1
+pkgrel=1
+pkgdesc='Standard encoder and decoder library for the Theora video compression format'
+arch=('x86_64')
+url='https://www.theora.org/'
+license=('BSD-3-Clause')
+source=("http://downloads.xiph.org/releases/theora/libtheora-$pkgver.tar.bz2")
+sha256sums=('b6ae1ee2fa3d42ac489287d3ec34c5885730b1296f0801ae577a35193d3affbc')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libogg')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libtheora-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-examples
+    ${MAKE}
+}
+
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libtheora-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
