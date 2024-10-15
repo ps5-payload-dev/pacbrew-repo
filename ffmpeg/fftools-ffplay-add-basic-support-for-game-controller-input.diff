@@ -1,0 +1,200 @@
+diff --git a/doc/ffplay.texi b/doc/ffplay.texi
+index 93f77eeece..d527a2636e 100644
+--- a/doc/ffplay.texi
++++ b/doc/ffplay.texi
+@@ -210,7 +210,7 @@ automatically.
+ 
+ @end table
+ 
+-@section While playing
++@section Keyboard inputs while playing
+ 
+ @table @key
+ @item q, ESC
+@@ -261,6 +261,12 @@ Seek to the previous/next chapter.
+ or if there are no chapters
+ Seek backward/forward 10 minutes.
+ 
++@end table
++
++@section Mouse inputs while playing
++
++@table @key
++
+ @item right mouse click
+ Seek to percentage in file corresponding to fraction of width.
+ 
+@@ -269,6 +275,35 @@ Toggle full screen.
+ 
+ @end table
+ 
++@section Game controller inputs while playing
++
++@table @key
++
++@item A
++Pause.
++
++@item B
++Cycle subtitle channel in the current program.
++
++@item X
++Cycle audio channel in the current program.
++
++@item Y
++Cycle video channel.
++
++@item D-pad left/right
++Seek backward/forward 10 seconds.
++
++@item D-pad down/up
++Seek backward/forward 1 minute.
++
++@item left/right shoulder
++Seek to the previous/next chapter.
++or if there are no chapters
++Seek backward/forward 10 minutes.
++
++@end table
++
+ @c man end
+ 
+ @include config.texi
+diff --git a/fftools/ffplay.c b/fftools/ffplay.c
+index efcd4f6452..8c9c1f9bca 100644
+--- a/fftools/ffplay.c
++++ b/fftools/ffplay.c
+@@ -3349,6 +3349,48 @@ static void event_loop(VideoState *cur_stream)
+         double x;
+         refresh_loop_wait_event(cur_stream, &event);
+         switch (event.type) {
++        case SDL_CONTROLLERBUTTONDOWN:
++            switch (event.cbutton.button) {
++            case SDL_CONTROLLER_BUTTON_A:
++                toggle_pause(cur_stream);
++                break;
++            case SDL_CONTROLLER_BUTTON_B:
++                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
++                break;
++            case SDL_CONTROLLER_BUTTON_X:
++                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
++                break;
++            case SDL_CONTROLLER_BUTTON_Y:
++                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
++                break;
++            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
++                if (cur_stream->ic->nb_chapters <= 1) {
++                    incr = -600.0;
++                    goto do_seek;
++                }
++                seek_chapter(cur_stream, -1);
++                break;
++            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
++                if (cur_stream->ic->nb_chapters <= 1) {
++                    incr = 600.0;
++                    goto do_seek;
++                }
++                seek_chapter(cur_stream, 1);
++                break;
++            case SDL_CONTROLLER_BUTTON_DPAD_UP:
++                incr = 60.0;
++                goto do_seek;
++            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
++                incr = -60.0;
++                goto do_seek;
++            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
++                incr = seek_interval ? -seek_interval : -10.0;
++                goto do_seek;
++            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
++                incr = seek_interval ? seek_interval : 10.0;
++                goto do_seek;
++            }
++            break;
+         case SDL_KEYDOWN:
+             if (exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
+                 do_exit(cur_stream);
+@@ -3717,31 +3759,42 @@ void show_help_default(const char *opt, const char *arg)
+     show_help_children(avcodec_get_class(), AV_OPT_FLAG_DECODING_PARAM);
+     show_help_children(avformat_get_class(), AV_OPT_FLAG_DECODING_PARAM);
+     show_help_children(avfilter_get_class(), AV_OPT_FLAG_FILTERING_PARAM);
+-    printf("\nWhile playing:\n"
+-           "q, ESC              quit\n"
+-           "f                   toggle full screen\n"
+-           "p, SPC              pause\n"
+-           "m                   toggle mute\n"
+-           "9, 0                decrease and increase volume respectively\n"
+-           "/, *                decrease and increase volume respectively\n"
+-           "a                   cycle audio channel in the current program\n"
+-           "v                   cycle video channel\n"
+-           "t                   cycle subtitle channel in the current program\n"
+-           "c                   cycle program\n"
+-           "w                   cycle video filters or show modes\n"
+-           "s                   activate frame-step mode\n"
+-           "left/right          seek backward/forward 10 seconds or to custom interval if -seek_interval is set\n"
+-           "down/up             seek backward/forward 1 minute\n"
+-           "page down/page up   seek backward/forward 10 minutes\n"
+-           "right mouse click   seek to percentage in file corresponding to fraction of width\n"
+-           "left double-click   toggle full screen\n"
+-           );
++    printf("\nKeyboard inputs while playing:\n"
++           "  q, ESC                quit\n"
++           "  f                     toggle full screen\n"
++           "  p, SPC                pause\n"
++           "  m                     toggle mute\n"
++           "  9, 0                  decrease and increase volume respectively\n"
++           "  /, *                  decrease and increase volume respectively\n"
++           "  a                     cycle audio channel in the current program\n"
++           "  v                     cycle video channel\n"
++           "  t                     cycle subtitle channel in the current program\n"
++           "  c                     cycle program\n"
++           "  w                     cycle video filters or show modes\n"
++           "  s                     activate frame-step mode\n"
++           "  left/right            seek backward/forward 10 seconds or to custom interval if -seek_interval is set\n"
++           "  down/up               seek backward/forward 1 minute\n"
++           "  page down/page up     seek backward/forward 10 minutes\n"
++           "\n"
++           "Mouse inputs while playing:\n"
++           "  right mouse click     seek to percentage in file corresponding to fraction of width\n"
++           "  left double-click     toggle full screen\n"
++           "\n"
++           "Game controller inputs while playing:\n"
++           "  A                     pause\n"
++           "  B                     cycle subtitle channel in the current program\n"
++           "  X                     cycle audio channel in the current program\n"
++           "  Y                     cycle video channel\n"
++           "  D-pad left/right      seek backward/forward 10 seconds or to custom interval if -seek_interval is set\n"
++           "  D-pad down/up         seek backward/forward 1 minute\n"
++           "  left/right shoulder   seek backward/forward 10 minutes\n"
++        );
+ }
+ 
+ /* Called from the main */
+ int main(int argc, char **argv)
+ {
+-    int flags, ret;
++    int flags, ret, i;
+     VideoState *is;
+ 
+     init_dynload();
+@@ -3775,7 +3828,7 @@ int main(int argc, char **argv)
+     if (display_disable) {
+         video_disable = 1;
+     }
+-    flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
++    flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER;
+     if (audio_disable)
+         flags &= ~SDL_INIT_AUDIO;
+     else {
+@@ -3866,6 +3919,12 @@ int main(int argc, char **argv)
+         }
+     }
+ 
++    for (i = 0; i < SDL_NumJoysticks(); i++) {
++        if (!SDL_GameControllerOpen(i)) {
++            av_log(NULL, AV_LOG_WARNING, "Failed to a open game controller: %s\n", SDL_GetError());
++        }
++    }
++
+     is = stream_open(input_filename, file_iformat);
+     if (!is) {
+         av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
