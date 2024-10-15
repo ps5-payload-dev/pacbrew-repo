@@ -1,4 +1,4 @@
-name: CI
+name: ps5-payload-libs
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
         sudo apt install makepkg pacman-package-manager
 
     - name: Build SDK
-      run: bash ci.sh
+      run: bash ci-libs.sh
 
     - name: Package SDK
       run: tar -czf ps5-payload-dev.tar.gz -C / opt/ps5-payload-sdk

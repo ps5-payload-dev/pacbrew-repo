@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 
 PKGS=(sdk libcxx fast_float
-      elfldr ftpsrv gdbsrv klogsrv shsrv
       bzip2 zlib xz zstd libarchive libdeflate
       mbedtls bearssl wolfssl
       libevent libiconv libfribidi
       libconfig json-c tinyxml2 expat jansson
       miniupnpc
       file
-      sqlite libmicrohttpd websrv
+      sqlite libmicrohttpd
       libpng libjpeg-turbo libwebp giflib
       freetype harfbuzz fontconfig
       libsamplerate libsodium libogg libvorbis flac opus

@@ -1,4 +1,4 @@
-name: PS5 Payload Daemons
+name: ps5-payload-daemons
 
 on:
   push:
