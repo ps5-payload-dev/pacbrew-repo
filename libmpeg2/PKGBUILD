@@ -1,0 +1,42 @@
+pkgname=ps5-payload-libmpeg2
+pkgver=0.5.1
+pkgrel=1
+pkgdesc='Library for decoding MPEG-1 and MPEG-2 video streams'
+arch=('x86_64')
+url='https://libmpeg2.sourceforge.io'
+license=('GPL-2.0-or-later')
+source=("https://libmpeg2.sourceforge.io/files/libmpeg2-$pkgver.tar.gz")
+sha256sums=('dee22e893cb5fc2b2b6ebd60b88478ab8556cb3b93f9a0d7ce8f3b61851871d4')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd libmpeg2-$pkgver
+    autoreconf -fi
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libmpeg2-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-sdl
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libmpeg2-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
