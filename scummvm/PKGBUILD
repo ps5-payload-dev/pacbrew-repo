@@ -46,7 +46,7 @@ package() {
     cd scummvm-${pkgver}
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
-    make install
+    ${MAKE} install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }
