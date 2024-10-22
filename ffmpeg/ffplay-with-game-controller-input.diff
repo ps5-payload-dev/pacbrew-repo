@@ -1,75 +1,15 @@
-diff --git a/doc/ffplay.texi b/doc/ffplay.texi
-index 93f77eeece..d527a2636e 100644
---- a/doc/ffplay.texi
-+++ b/doc/ffplay.texi
-@@ -210,7 +210,7 @@ automatically.
- 
- @end table
- 
--@section While playing
-+@section Keyboard inputs while playing
- 
- @table @key
- @item q, ESC
-@@ -261,6 +261,12 @@ Seek to the previous/next chapter.
- or if there are no chapters
- Seek backward/forward 10 minutes.
- 
-+@end table
-+
-+@section Mouse inputs while playing
-+
-+@table @key
-+
- @item right mouse click
- Seek to percentage in file corresponding to fraction of width.
- 
-@@ -269,6 +275,35 @@ Toggle full screen.
- 
- @end table
- 
-+@section Game controller inputs while playing
-+
-+@table @key
-+
-+@item A
-+Pause.
-+
-+@item B
-+Cycle subtitle channel in the current program.
-+
-+@item X
-+Cycle audio channel in the current program.
-+
-+@item Y
-+Cycle video channel.
-+
-+@item D-pad left/right
-+Seek backward/forward 10 seconds.
-+
-+@item D-pad down/up
-+Seek backward/forward 1 minute.
-+
-+@item left/right shoulder
-+Seek to the previous/next chapter.
-+or if there are no chapters
-+Seek backward/forward 10 minutes.
-+
-+@end table
-+
- @c man end
- 
- @include config.texi
-diff --git a/fftools/ffplay.c b/fftools/ffplay.c
-index efcd4f6452..8c9c1f9bca 100644
---- a/fftools/ffplay.c
-+++ b/fftools/ffplay.c
-@@ -3349,6 +3349,48 @@ static void event_loop(VideoState *cur_stream)
+diff -Naur ffmpeg-7.0.1.orig/fftools/ffplay.c ffmpeg-7.0.1/fftools/ffplay.c
+--- ffmpeg-7.0.1.orig/fftools/ffplay.c	2024-05-26 02:42:36.000000000 +0200
++++ ffmpeg-7.0.1/fftools/ffplay.c	2024-10-22 20:24:53.743855891 +0200
+@@ -3356,6 +3356,51 @@
          double x;
          refresh_loop_wait_event(cur_stream, &event);
          switch (event.type) {
 +        case SDL_CONTROLLERBUTTONDOWN:
 +            switch (event.cbutton.button) {
++            case SDL_CONTROLLER_BUTTON_START:
++                SDL_OpenURL("http://127.0.0.1:8080");
++                break;
 +            case SDL_CONTROLLER_BUTTON_A:
 +                toggle_pause(cur_stream);
 +                break;
@@ -113,7 +53,7 @@ index efcd4f6452..8c9c1f9bca 100644
          case SDL_KEYDOWN:
              if (exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
                  do_exit(cur_stream);
-@@ -3717,31 +3759,42 @@ void show_help_default(const char *opt, const char *arg)
+@@ -3724,31 +3769,42 @@
      show_help_children(avcodec_get_class(), AV_OPT_FLAG_DECODING_PARAM);
      show_help_children(avformat_get_class(), AV_OPT_FLAG_DECODING_PARAM);
      show_help_children(avfilter_get_class(), AV_OPT_FLAG_FILTERING_PARAM);
@@ -176,7 +116,7 @@ index efcd4f6452..8c9c1f9bca 100644
      VideoState *is;
  
      init_dynload();
-@@ -3775,7 +3828,7 @@ int main(int argc, char **argv)
+@@ -3782,7 +3838,7 @@
      if (display_disable) {
          video_disable = 1;
      }
@@ -185,7 +125,7 @@ index efcd4f6452..8c9c1f9bca 100644
      if (audio_disable)
          flags &= ~SDL_INIT_AUDIO;
      else {
-@@ -3866,6 +3919,12 @@ int main(int argc, char **argv)
+@@ -3868,6 +3924,12 @@
          }
      }
  
