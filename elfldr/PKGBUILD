@@ -1,11 +1,11 @@
 pkgname=ps5-payload-elfldr
-pkgver=0.15
+pkgver=git
 pkgrel=1
 pkgdesc="An ELF loader for jailbroken PS5s"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/elfldr"
-source=("git+https://github.com/ps5-payload-dev/elfldr.git#tag=v${pkgver}")
+source=("git+https://github.com/ps5-payload-dev/elfldr.git")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-daemon')
 options=(!strip libtool staticlibs)
