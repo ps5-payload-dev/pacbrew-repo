@@ -1,11 +1,11 @@
 pkgname=ps5-payload-klogsrv
-pkgver=0.4.1
+pkgver=git
 pkgrel=1
 pkgdesc="A socket server for /dev/klog"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/klogsrv"
-source=("git+https://github.com/ps5-payload-dev/klogsrv.git#tag=v${pkgver}")
+source=("git+https://github.com/ps5-payload-dev/klogsrv.git")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-daemon')
 options=(!strip libtool staticlibs)

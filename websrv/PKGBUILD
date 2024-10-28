@@ -1,11 +1,11 @@
 pkgname=ps5-payload-websrv
-pkgver=0.11
+pkgver=git
 pkgrel=1
 pkgdesc="A web server for jailbroken PS5s that accepts connections on port 8080"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/websrv"
-source=("git+https://github.com/ps5-payload-dev/websrv.git#tag=v${pkgver}")
+source=("git+https://github.com/ps5-payload-dev/websrv.git")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-daemon')
 makedepends=('ps5-payload-sdk')

@@ -1,11 +1,11 @@
 pkgname=ps5-payload-gdbsrv
-pkgver=0.4
+pkgver=git
 pkgrel=1
 pkgdesc="A GDB server to PS5 payloads"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/gdbsrv"
-source=("git+https://github.com/ps5-payload-dev/gdbsrv.git#tag=v${pkgver}")
+source=("git+https://github.com/ps5-payload-dev/gdbsrv.git")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-daemon')
 options=(!strip libtool staticlibs)

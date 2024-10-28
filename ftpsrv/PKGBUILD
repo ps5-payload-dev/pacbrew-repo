@@ -1,11 +1,11 @@
 pkgname=ps5-payload-ftpsrv
-pkgver=0.10.2
+pkgver=git
 pkgrel=1
 pkgdesc="An FTP server for jailbroken PS5s that accepts connections on port 2121"
 arch=('x86_64')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/ftpsrv"
-source=("git+https://github.com/ps5-payload-dev/ftpsrv.git#tag=v${pkgver}")
+source=("git+https://github.com/ps5-payload-dev/ftpsrv.git")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev' 'ps5-payload-daemon')
 options=(!strip libtool staticlibs)
