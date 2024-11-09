@@ -1,0 +1,40 @@
+pkgname=ps5-payload-openlibm
+pkgver=0.8.4
+pkgrel=1
+pkgdesc='Standalone implementation of C mathematical functions'
+arch=('x86_64')
+url='https://openlibm.org/'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/JuliaMath/openlibm/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('c0bac12a6596f2315341790a7f386f9162a5b1f98db9ec40d883fce64e231942')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd openlibm-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd openlibm-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ln -s libopenlibm.a \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/target/user/homebrew/lib/libm.a"
+}
