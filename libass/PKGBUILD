@@ -30,8 +30,7 @@ build() {
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
-		--disable-asm --enable-large-tiles \
-		--disable-require-system-font-provider
+		--disable-asm --enable-large-tiles 
     ${MAKE} V=1
 }
 
