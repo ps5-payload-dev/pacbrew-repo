@@ -1,0 +1,56 @@
+pkgname=ps5-payload-llvm
+pkgver=18.1.8
+pkgrel=1
+pkgdesc="LLVM Compiler infrastructure"
+arch=('x86_64')
+url="https://clang.llvm.org/"
+license=('Apache-2.0 WITH LLVM-exception')
+options=(!strip libtool staticlibs)
+source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-project-$pkgver.src.tar.xz")
+sha256sums=('0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd llvm-project-$pkgver.src
+    sed -i 's|static_assert(|static_assert(1 or |g' llvm/lib/Support/SmallVector.cpp # TODO
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd llvm-project-$pkgver.src
+
+    LLVM_BINDIR=$("${PS5_PAYLOAD_SDK}/bin/llvm-config" --bindir)
+    ${CMAKE} -S llvm -B build  \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DLLVM_HOST_TRIPLE=x86_64-sie-ps5 \
+	     -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
+	     -DLLVM_ENABLE_PROJECTS="" \
+	     -DLLVM_ENABLE_PLUGINS=NO \
+	     -DLLVM_ENABLE_BACKTRACES=Off \
+	     -DLLVM_BUILD_RUNTIME=Off \
+	     -DLLVM_BUILD_TOOLS=NO \
+	     -DLLVM_BUILD_LLVM_DYLIB=NO \
+	     -DLLVM_INCLUDE_TESTS=Off \
+	     -DLLVM_INCLUDE_EXAMPLES=Off \
+	     -DLLVM_INCLUDE_BENCHMARKS=Off \
+	     -DLLVM_LINK_LLVM_DYLIB=NO \
+	     -DLLVM_TOOL_LTO_BUILD=NO \
+	     -DLLVM_NATIVE_TOOL_DIR="${LLVM_BINDIR}" \
+	     -DLLVM_CONFIG_PATH="${PS5_PAYLOAD_SDK}/bin/llvm-config" \
+	     -DLLVM_USE_HOST_TOOLS=TRUE \
+	     -DLLVM_TABLEGEN="${LLVM_BINDIR}/llvm-tblgen"
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd llvm-project-$pkgver.src
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+}
