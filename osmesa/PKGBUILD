@@ -1,0 +1,55 @@
+pkgname=ps5-payload-osmesa
+pkgver=7.0.4.git
+pkgrel=1
+pkgdesc='Library providing Mesa3d 7.0.4 swrast and osmesa capabilities.'
+arch=('x86_64')
+url='https://github.com/starseeker/osmesa'
+license=('LGPL')
+options=(!strip libtool staticlibs)
+source=('git+https://github.com/starseeker/osmesa.git'
+       'osmesa.pc')
+sha256sums=('SKIP'
+	    '0c1fda27342a22c6f140950e9c51c47651f4092119d6971f857c8fd7769723c7')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    cd osmesa
+    sed -i 's|add_library(osmesa SHARED|add_library(osmesa|g' src/CMakeLists.txt
+    sed -i 's|add_library(glu SHARED|add_library(glu|g' examples/glu/CMakeLists.txt
+
+    # Avoid optimisation bug caused by -O2, not sure which pass is causing it :/
+    sed -i 's|"-O2"|"-O1"|g' src/CMakeLists.txt
+    sed -i 's|"-O3"|"-O1"|g' src/CMakeLists.txt
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd osmesa
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_CXX_FLAGS="-O1 -std=c++14" \
+	     -DCMAKE_C_FLAGS="-O1" \
+	     -DOSMESA_BUILD_EXAMPLES=NO \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd osmesa
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ln -s libosmesa.a "${DESTDIR}/${PREFIX}/lib/libOSMesa.a"
+    ln -s OSMesa "${DESTDIR}/${PREFIX}/include/GL"
+
+    mkdir -p "${DESTDIR}/${PREFIX}/lib/pkgconfig"
+    cp $srcdir/osmesa.pc "${DESTDIR}/${PREFIX}/lib/pkgconfig/osmesa.pc"
+    sed -i "s|@PREFIX@|${PREFIX}|g" "${DESTDIR}/${PREFIX}/lib/pkgconfig/osmesa.pc"
+}
