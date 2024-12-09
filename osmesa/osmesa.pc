@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: osmesa
+Description: Mesa Off-screen Rendering library
+Requires:
+Version: 7.04
+Libs: -L${libdir} -lOSMesa
+Cflags: -I${includedir}/OSMesa
