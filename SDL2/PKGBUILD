@@ -24,6 +24,7 @@ build() {
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DSDL_OPENGL=NO \
+	     -DSDL_LOADSO=YES \
 	     -B build \
              -S .
     ${MAKE} -C build
