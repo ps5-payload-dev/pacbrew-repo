@@ -1,0 +1,46 @@
+pkgname=ps5-payload-libressl
+pkgver=4.0.0
+pkgrel=1
+pkgdesc='Free version of the TLS/crypto stack forked from OpenSSL.'
+arch=('x86_64')
+
+url="https://www.libressl.org/"
+license=(ISC custom:OpenSSL)
+options=(!strip libtool staticlibs)
+source=("https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${pkgver}.tar.gz")
+sha256sums=('4d841955f0acc3dfc71d0e3dd35f283af461222350e26843fea9731c0246a1e4')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libressl-$pkgver
+
+    sed -i 's|-lthr||g' m4/check-os-options.m4
+    sed -i 's|USE_BUILTIN_ARC4RANDOM=yes|USE_BUILTIN_ARC4RANDOM=no|g' m4/check-os-options.m4
+    autoreconf -fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libressl-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libressl-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
