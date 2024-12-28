@@ -2,6 +2,8 @@
 
 PKGS=(sdk libmicrohttpd elfldr shsrv websrv klogsrv ftpsrv gdbsrv)
 
+sudo pacman --noconfirm --remove ps5-payload-dev
+
 for PKG in ${PKGS[*]} ; do
     pushd $PKG || exit 1
     rm -f *.pkg.tar.gz
