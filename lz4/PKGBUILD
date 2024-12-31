@@ -1,0 +1,42 @@
+pkgname=ps5-payload-lz4
+pkgver=1.10.0
+pkgrel=1
+pkgdesc='Extremely fast compression algorithm'
+arch=('x86_64')
+url='https://lz4.github.io/lz4/'
+license=('GPL-2.0-or-later')
+source=("https://github.com/lz4/lz4/releases/download/v$pkgver/lz4-$pkgver.tar.gz")
+sha256sums=('537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b')
+
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev' 'ps5-payload-sdl2')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    cd lz4-$pkgver
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lz4-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S build/cmake
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lz4-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
