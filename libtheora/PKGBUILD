@@ -16,6 +16,12 @@ prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
+
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libtheora-$pkgver
+
+    rm config.guess
+    autoreconf -vi -I m4
 }
 
 
