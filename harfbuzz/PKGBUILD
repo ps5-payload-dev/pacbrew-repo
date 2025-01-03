@@ -1,7 +1,7 @@
 pkgname=ps5-payload-harfbuzz
 pkgver=9.0.0
 pkgrel=1
-arch=('x86_64')
+arch=('any')
 pkgdesc="OpenType text shaping engine"
 url="https://harfbuzz.github.io/"
 license=('MIT')

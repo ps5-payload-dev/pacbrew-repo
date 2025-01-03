@@ -2,7 +2,7 @@ pkgname=ps5-payload-offact
 pkgver=master.git
 pkgrel=1
 pkgdesc="PS5 offline account activation"
-arch=('x86_64')
+arch=('any')
 license=('GPLv3')
 url="https://github.com/ps5-payload-dev/offact"
 source=("git+https://github.com/ps5-payload-dev/offact.git#branch=master")

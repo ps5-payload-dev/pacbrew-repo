@@ -2,7 +2,7 @@ pkgname=ps5-payload-libressl
 pkgver=4.0.0
 pkgrel=1
 pkgdesc='Free version of the TLS/crypto stack forked from OpenSSL.'
-arch=('x86_64')
+arch=('any')
 
 url="https://www.libressl.org/"
 license=(ISC custom:OpenSSL)

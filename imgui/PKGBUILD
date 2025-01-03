@@ -3,7 +3,7 @@ pkgver=1.91.0
 pkgrel=1
 pkgdesc="Bloat-free Graphical User interface for C++"
 license=('MIT')
-arch=('x86_64')
+arch=('any')
 url="https://github.com/ocornut/imgui"
 
 # On each update, keep up to date with latest sha in https://github.com/microsoft/vcpkg/commits/master/ports/imgui

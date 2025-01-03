@@ -2,7 +2,7 @@ pkgname=ps5-payload-fbneo
 pkgver=git
 pkgrel=1
 pkgdesc="FinalBurn Neo"
-arch=('x86_64')
+arch=('any')
 license=('custom')
 url="https://github.com/ps5-payload-dev/FBNeo"
 source=("git+https://github.com/ps5-payload-dev/FBNeo.git#branch=ps5")
