@@ -1,0 +1,45 @@
+pkgname=ps5-payload-libzip
+pkgver=1.11.2
+pkgrel=1
+pkgdesc="C library for reading, creating, and modifying zip archives"
+url="https://libzip.org"
+license=('BSD')
+arch=('any')
+source=("${url}/download/libzip-${pkgver}.tar.xz")
+sha256sums=('5d471308cef4c4752bbcf973d9cd37ba4cb53739116c30349d4764ba1410dfc1')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-zstd'
+	 'ps5-payload-libressl')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libzip-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DHAVE_MEMCPY_S=NO \
+	     -DHAVE_STRNCPY_S=NO \
+	     -DHAVE_STRERRORLEN_S=NO \
+	     -DHAVE_STRERROR_S=NO \
+	     -DHAVE_FTS_OPEN=NO \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libzip-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
