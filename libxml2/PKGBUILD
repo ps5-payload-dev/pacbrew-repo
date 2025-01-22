@@ -1,0 +1,49 @@
+pkgname=ps5-payload-libxml2
+pkgver=2.13.5
+pkgrel=1
+pkgdesc="XML C parser and toolkit"
+url="https://github.com/GNOME/libxml2"
+arch=('any')
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/GNOME/libxml2/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('87d681718760ba42e749a61482d71b34d1d566843e9ade39a73fea92caf8293b')
+groups=('ps5-payload-dev')
+depends=('ps5-payload-xz' 'ps5-payload-zlib')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libxml2-$pkgver
+
+    NOCONFIGURE=1 ./autogen.sh
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libxml2-$pkgver
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--without-python
+    ${MAKE} V=1
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libxml2-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    make install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+
+    mkdir -p "${pkgdir}/${PS5_PAYLOAD_SDK}/bin"
+    ln -s "../target/${PREFIX}/bin/xml2-config" \
+       "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/prospero-xml2-config"
+}
+
