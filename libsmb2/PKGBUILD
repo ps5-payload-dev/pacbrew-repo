@@ -1,0 +1,41 @@
+pkgname=ps5-payload-libsmb2
+pkgver=6.2
+pkgrel=1
+pkgdesc="SMB2/3 userspace client"
+url="https://github.com/sahlberg/libsmb2"
+arch=('any')
+license=('GPL')
+options=(!strip libtool staticlibs)
+source=("https://github.com/sahlberg/libsmb2/archive/refs/tags/libsmb2-$pkgver.tar.gz")
+sha256sums=('8e1f9efc6b2e0f6546f0fe121ac0ddf4fc2f0908ae5a6bd1f185be7c9e0bcbb3')
+makedepends=('ps5-payload-sdk')
+groups=('ps5-payload-dev')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libsmb2-libsmb2-$pkgver
+
+    # Optimizing with default -O2 causes issues.
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_C_FLAGS_RELEASE="-O1" \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libsmb2-libsmb2-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
+
