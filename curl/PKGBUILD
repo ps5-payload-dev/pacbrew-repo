@@ -35,7 +35,7 @@ build() {
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
-		--without-libpsl --with-wolfssl \
+		--with-wolfssl \
 		--with-ca-bundle="${PREFIX}/etc/ca-bundle.crt" \
 		--disable-docs
     ${MAKE}
