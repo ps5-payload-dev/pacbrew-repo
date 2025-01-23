@@ -11,7 +11,7 @@ source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz"
 sha256sums=('bce9eeb0f17ef8982390b1f37711a61b4290dc8c2a0c1a37b5857e85bfb0e4ff'
 	    '30f3119ad501d4ca16f3f2b7a4a194a82f36aad506ba05227fcbb50145da2d53')
 groups=('ps5-payload-dev')
-depends=('ps5-payload-zlib' 'ps5-payload-mbedtls' 'ps5-payload-freetype'
+depends=('ps5-payload-zlib' 'ps5-payload-libressl' 'ps5-payload-freetype'
 	 'ps5-payload-libfribidi' 'ps5-payload-harfbuzz' 'ps5-payload-libass')
 makedepends=('ps5-payload-sdk')
 
@@ -32,7 +32,7 @@ build() {
 	--cross-prefix="${PS5_PAYLOAD_SDK}/bin/prospero-" \
 	--enable-static --disable-shared \
 	--arch=x86_64 --target-os=freebsd \
-	--enable-mbedtls --enable-version3 \
+	--enable-openssl --enable-version3 \
 	--enable-libfreetype --enable-libfribidi --enable-libharfbuzz \
 	--disable-debug --disable-doc \
 	--enable-libass \
