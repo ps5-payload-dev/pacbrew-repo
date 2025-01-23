@@ -38,7 +38,7 @@ build() {
 		--without-libpsl --with-openssl \
 		--with-ca-bundle="${PREFIX}/etc/ca-bundle.crt" \
 		--disable-docs
-    ${MAKE} V=1
+    ${MAKE}
 }
 
 package() {
