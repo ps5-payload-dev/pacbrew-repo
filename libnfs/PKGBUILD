@@ -1,5 +1,5 @@
 pkgname=ps5-payload-libnfs
-pkgver=6.0.2
+pkgver=5.0.3
 pkgrel=1
 pkgdesc="client library for accessing NFS shares"
 url="https://github.com/sahlberg/libnfs"
@@ -7,7 +7,7 @@ arch=('any')
 license=('GPL')
 options=(!strip libtool staticlibs)
 source=("https://github.com/sahlberg/libnfs/archive/libnfs-$pkgver.tar.gz")
-sha256sums=('4e5459cc3e0242447879004e9ad28286d4d27daa42cbdcde423248fad911e747')
+sha256sums=('d945cb4f4c8f82ee1f3640893a168810f794a28e1010bb007ec5add345e9df3e')
 makedepends=('ps5-payload-sdk')
 groups=('ps5-payload-dev')
 
