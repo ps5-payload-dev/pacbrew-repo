@@ -1,0 +1,38 @@
+pkgname=ps5-payload-libpsl
+pkgver=0.21.5
+pkgrel=1
+pkgdesc='Public Suffix List library'
+url='https://github.com/rockdaboot/libpsl'
+arch=('any')
+license=('MIT')
+source=("https://github.com/rockdaboot/libpsl/releases/download/${pkgver}/libpsl-${pkgver}.tar.gz")
+sha256sums=('1dcc9ceae8b128f3c0b3f654decd0e1e891afc6ff81098f227ef260449dae208')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libpsl-${pkgver}
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static --disable-shared \
+		--disable-nls --disable--gtk-doc-html
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libpsl-${pkgver}
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
