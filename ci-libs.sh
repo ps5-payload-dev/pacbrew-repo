@@ -3,7 +3,7 @@
 PKGS=(sdk openlibm libcxx fast_float
       bzip2 zlib xz zstd libarchive libdeflate
       mbedtls wolfssl
-      libevent libiconv libfribidi
+      libevent libiconv libfribidi libpsl
       libconfig json-c tinyxml2 libxml2 expat jansson
       miniupnpc
       file
