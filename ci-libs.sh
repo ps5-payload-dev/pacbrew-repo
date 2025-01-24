@@ -2,12 +2,13 @@
 
 PKGS=(sdk openlibm libcxx fast_float
       bzip2 zlib xz zstd libarchive libdeflate
-      mbedtls bearssl wolfssl
+      mbedtls wolfssl
       libevent libiconv libfribidi
       libconfig json-c tinyxml2 libxml2 expat jansson
       miniupnpc
       file
       sqlite libmicrohttpd
+      libnfs libsmb2 libssh2
       libpng libjpeg-turbo libwebp giflib
       freetype harfbuzz fontconfig
       libsamplerate libsodium libogg libvorbis flac opus
