@@ -23,7 +23,7 @@ build() {
     cd SDL
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DSDL_OPENGL=NO \
+	     -DSDL_OPENGL=YES \
 	     -DSDL_LOADSO=YES \
 	     -B build \
              -S .
