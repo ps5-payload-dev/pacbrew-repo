@@ -33,7 +33,7 @@ jobs:
       run: tar -czf ps5-payload-libs.tar.gz -C / opt/ps5-payload-sdk
 
     - name: Upload Libs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ps5-payload-libs
         path: ./ps5-payload-libs.tar.gz
