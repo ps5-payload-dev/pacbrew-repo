@@ -1,0 +1,60 @@
+pkgname=ps5-payload-mesa
+pkgver=22.1.7
+pkgrel=1
+pkgdesc="Open-source OpenGL drivers"
+url="https://www.mesa3d.org/"
+arch=('any')
+license=("MIT AND BSD-3-Clause AND SGI-B-2.0")
+
+options=(!strip libtool staticlibs)
+source=("https://mesa.freedesktop.org/archive/older-versions/22.x/mesa-$pkgver.tar.xz")
+sha256sums=('da838eb2cf11d0e08d0e9944f6bd4d96987fdc59ea2856f8c70a31a82b355d89')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk' 'ps5-payload-llvm')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd mesa-$pkgver
+
+    sed -i 's|config-tool|cmake|g' meson.build
+    sed -i 's|DETECT_OS_UNIX|0|g' src/util/log.c # no syslog
+    sed -i 's|open_memstream|NULL; //|g' src/util/memstream.c # FIXME
+    sed -i 's|-DUSE_ELF_TLS||g' meson.build
+    sed -i 's|#define CACHE_LINE_SIZE 64|#define CACHE_LINE_SIZE 128|g' src/util/macros.h
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd mesa-$pkgver
+
+    export CFLAGS="-Wno-thread-safety-analysis -O1"
+    export CXXFLAGS="-Wno-thread-safety-analysis -O1 -std=c++17"
+    ${MESON} setup builddir \
+	     -Dosmesa=true \
+	     -Dplatforms= \
+	     -Dvulkan-drivers= \
+	     -Dgallium-drivers=swrast \
+	     -Degl=disabled \
+	     -Dgbm=disabled \
+	     -Dglx=disabled \
+	     -Dgles1=disabled \
+	     -Dgles2=disabled \
+	     -Dshared-glapi=disabled \
+	     -Dllvm=enabled \
+	     -Dshared-llvm=disabled \
+	     -Dcpp_rtti=false \
+	     -Dopengl=true
+
+    ${MESON} compile -vC builddir
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd mesa-$pkgver
+
+    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_SYSROOT}"
+}
