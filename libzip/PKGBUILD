@@ -11,7 +11,7 @@ sha256sums=('5d471308cef4c4752bbcf973d9cd37ba4cb53739116c30349d4764ba1410dfc1')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-zlib' 'ps5-payload-bzip2' 'ps5-payload-zstd'
-	 'ps5-payload-libressl')
+	 )
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
