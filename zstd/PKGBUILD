@@ -21,9 +21,10 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd zstd-${pkgver}
 
-    export prefix="${PREFIX}"
-    export CFLAGS=-DZSTD_NO_TRACE
-    ${MAKE} -C lib libzstd.a V=1
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B builddir \
+             -S build/cmake
+    ${MAKE} -C builddir
 }
 
 package() {
@@ -31,5 +32,7 @@ package() {
     cd zstd-${pkgver}
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
-    ${MAKE} -C lib install-pc install-static install-includes
+    ${MAKE} -C builddir install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }
