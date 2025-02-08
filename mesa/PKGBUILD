@@ -10,7 +10,7 @@ options=(!strip libtool staticlibs)
 source=("https://mesa.freedesktop.org/archive/older-versions/22.x/mesa-$pkgver.tar.xz")
 sha256sums=('da838eb2cf11d0e08d0e9944f6bd4d96987fdc59ea2856f8c70a31a82b355d89')
 
-groups=('ps5-payload-dev')
+groups=('ps5-payload-dev' 'ps5-payload-gl')
 makedepends=('ps5-payload-sdk' 'ps5-payload-llvm')
 
 prepare() {
