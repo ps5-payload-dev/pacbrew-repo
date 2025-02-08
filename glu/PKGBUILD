@@ -2,13 +2,14 @@ pkgname=ps5-payload-glu
 pkgver=9.0.3
 pkgrel=1
 pkgdesc="Mesa OpenGL utility library"
-arch=('x86_64')
+arch=('any')
 url="https://gitlab.freedesktop.org/mesa/glu"
 license=('SGI-B-2.0' 'MIT')
-depends=('ps5-payload-mesa')
-makedepends=('ps5-payload-sdk')
+options=(!strip libtool staticlibs)
 source=("https://mesa.freedesktop.org/archive/glu/glu-$pkgver.tar.xz")
 sha256sums=('bd43fe12f374b1192eb15fe20e45ff456b9bc26ab57f0eee919f96ca0f8a330f')
+depends=('ps5-payload-mesa')
+makedepends=('ps5-payload-sdk')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

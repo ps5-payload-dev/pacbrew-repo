@@ -2,9 +2,10 @@ pkgname=ps5-payload-glew
 pkgver=2.2.0
 pkgrel=1
 pkgdesc="The OpenGL Extension Wrangler Library"
-arch=('x86_64')
+arch=('any')
 url="https://github.com/nigels-com/glew"
 license=("LicenseRef-glew")
+options=(!strip libtool staticlibs)
 source=("https://github.com/nigels-com/glew/releases/download/glew-$pkgver/glew-$pkgver.tgz")
 sha256sums=('d4fc82893cfb00109578d0a1a2337fb8ca335b3ceccf97b97e5cc7f08e4353e1')
 depends=('ps5-payload-mesa')
@@ -14,6 +15,9 @@ prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
+
+    cd glew-$pkgver
+    sed -i 's|find_package (OpenGL REQUIRED)||g' build/cmake/CMakeLists.txt
 }
 
 build() {
@@ -25,7 +29,7 @@ build() {
 	     -DBUILD_UTILS=NO \
 	     -B build \
              -S build/cmake
-    ${MAKE} -C build
+    ${MAKE} -C build glew_s
 }
 
 package() {
