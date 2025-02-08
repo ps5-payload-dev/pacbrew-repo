@@ -1,0 +1,32 @@
+pkgname=ps5-payload-glu
+pkgver=9.0.3
+pkgrel=1
+pkgdesc="Mesa OpenGL utility library"
+arch=('x86_64')
+url="https://gitlab.freedesktop.org/mesa/glu"
+license=('SGI-B-2.0' 'MIT')
+depends=('ps5-payload-mesa')
+makedepends=('ps5-payload-sdk')
+source=("https://mesa.freedesktop.org/archive/glu/glu-$pkgver.tar.xz")
+sha256sums=('bd43fe12f374b1192eb15fe20e45ff456b9bc26ab57f0eee919f96ca0f8a330f')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd glu-$pkgver
+
+    ${MESON} setup builddir -Dgl_provider=osmesa
+    ${MESON} compile -vC builddir
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd glu-$pkgver
+
+    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_SYSROOT}"
+}
