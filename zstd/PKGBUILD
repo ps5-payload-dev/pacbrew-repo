@@ -22,6 +22,8 @@ build() {
     cd zstd-${pkgver}
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DZSTD_BUILD_STATIC=YES \
+	     -DZSTD_BUILD_SHARED=NO \
 	     -B builddir \
              -S build/cmake
     ${MAKE} -C builddir
