@@ -1,0 +1,35 @@
+pkgname=ps5-payload-7zip
+pkgver=2409
+pkgrel=1
+pkgdesc="File archiver for extremely high compression"
+arch=('any')
+url="https://www.7-zip.org"
+license=('LGPL-2.1-or-later' 'BSD-3-Clause' 'LicenseRef-UnRAR')
+options=(!strip libtool staticlibs)
+source=(https://7-zip.org/a/7z$pkgver-src.tar.xz)
+sha256sums=('49c05169f49572c1128453579af1632a952409ced028259381dac30726b6133a')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+#    for component in Bundles/{Alone,Alone7z,Format7zF,SFXCon} UI/Console; do
+    for component in UI/Console; do
+	${MAKE} -C CPP/7zip/$component -f ../../cmpl_clang_x64.mak \
+		CC="${CC}" CXX="${CXX}" CFLAGS_WARN_WALL="" \
+		PLATFORM=x64 USE_ASM=
+    done
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+
+    mkdir -p "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+    mv CPP/7zip/UI/Console/b/c_x64/7z "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+}
