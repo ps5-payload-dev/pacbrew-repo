@@ -38,5 +38,5 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mbedtls-$pkgver
 
-    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_SYSROOT}" install
+    ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_PAYLOAD_SDK}/target" install
 }

@@ -30,5 +30,5 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd glu-$pkgver
 
-    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_SYSROOT}"
+    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_PAYLOAD_SDK}/target"
 }

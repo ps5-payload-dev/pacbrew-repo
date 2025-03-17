@@ -22,7 +22,7 @@ build() {
     cd llvm-project-$pkgver.src
 
     ${CMAKE} -S runtimes -B build \
-	     -DCMAKE_INSTALL_PREFIX="${PS5_SYSROOT}" \
+	     -DCMAKE_INSTALL_PREFIX="${PS5_PAYLOAD_SDK}/target" \
 	     -DCMAKE_BUILD_TYPE=Release \
 	     -DCMAKE_CXX_FLAGS="-nostdlib++" \
 	     -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
