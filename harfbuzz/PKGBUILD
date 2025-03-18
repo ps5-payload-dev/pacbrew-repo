@@ -20,17 +20,13 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd harfbuzz-$pkgver
 
-    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DHB_HAVE_FREETYPE=YES \
-	     -B build \
-             -S .
-    ${MAKE} -C build
+    ${MESON} setup builddir
+    ${MESON} compile -vC builddir
 }
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd harfbuzz-$pkgver
 
-    export DESTDIR="${pkgdir}/${DESTDIR}"
-    ${MAKE} -C build install
+    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_PAYLOAD_SDK}/target"
 }
