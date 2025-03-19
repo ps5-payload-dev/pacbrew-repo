@@ -7,6 +7,7 @@ url="https://katajakasa.github.io/SDL_kitchensink/"
 license=('MIT')
 source=("https://github.com/katajakasa/SDL_kitchensink/archive/refs/tags/$pkgver.tar.gz")
 sha256sums=('e9b5406b68434cd50fa209aacbf8aefe83e76e9feacfaaf306e018a56b333970')
+options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-sdl2' 'ps5-payload-ffmpeg' 'ps5-payload-libass')
