@@ -1,5 +1,5 @@
 pkgname=ps5-payload-openlibm
-pkgver=0.8.4
+pkgver=0.8.6
 pkgrel=1
 pkgdesc='Standalone implementation of C mathematical functions'
 arch=('any')
@@ -7,7 +7,7 @@ url='https://openlibm.org/'
 license=('MIT')
 options=(!strip libtool staticlibs)
 source=("https://github.com/JuliaMath/openlibm/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('c0bac12a6596f2315341790a7f386f9162a5b1f98db9ec40d883fce64e231942')
+sha256sums=('347998968cfeb2f9b91de6a8e85d2ba92dec0915d53500a4bc483e056f85b94c')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
