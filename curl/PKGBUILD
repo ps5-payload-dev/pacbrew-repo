@@ -29,10 +29,6 @@ build() {
     # Fetch CA bundle
     ./scripts/mk-ca-bundle.pl
 
-    # Optimizing with default -O2 causes issues at src/tool_operate.c:1157
-    # where outs->stream is set to NULL.
-    export CFLAGS="-O1"
-
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--with-wolfssl \

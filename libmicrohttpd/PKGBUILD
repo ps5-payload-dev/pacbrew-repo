@@ -20,9 +20,6 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libmicrohttpd-${pkgver}
 
-    # Optimizing with default -O2 causes issues
-    export CFLAGS="-O1"
- 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared --disable-doc \
 		--disable-curl --disable-examples

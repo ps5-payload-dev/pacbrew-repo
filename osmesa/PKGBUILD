@@ -20,10 +20,6 @@ prepare() {
     cd osmesa
     sed -i 's|add_library(osmesa SHARED|add_library(osmesa|g' src/CMakeLists.txt
     sed -i 's|add_library(glu SHARED|add_library(glu|g' examples/glu/CMakeLists.txt
-
-    # Avoid optimisation bug caused by -O2, not sure which pass is causing it :/
-    sed -i 's|"-O2"|"-O1"|g' src/CMakeLists.txt
-    sed -i 's|"-O3"|"-O1"|g' src/CMakeLists.txt
 }
 
 build() {
@@ -31,8 +27,7 @@ build() {
     cd osmesa
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DCMAKE_CXX_FLAGS="-O1 -std=c++14" \
-	     -DCMAKE_C_FLAGS="-O1" \
+	     -DCMAKE_CXX_FLAGS="-std=c++14" \
 	     -DOSMESA_BUILD_EXAMPLES=NO \
 	     -B build \
              -S .

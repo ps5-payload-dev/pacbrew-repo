@@ -31,8 +31,8 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mesa-$pkgver
 
-    export CFLAGS="-Wno-thread-safety-analysis -O1"
-    export CXXFLAGS="-Wno-thread-safety-analysis -O1 -std=c++17"
+    export CFLAGS="-Wno-thread-safety-analysis"
+    export CXXFLAGS="-Wno-thread-safety-analysis -std=c++17"
     ${MESON} setup builddir \
 	     -Dosmesa=true \
 	     -Dplatforms= \

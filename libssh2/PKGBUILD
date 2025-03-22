@@ -22,7 +22,6 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libssh2-$pkgver
 
-    export CFLAGS="-O1"
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--disable-docker-tests

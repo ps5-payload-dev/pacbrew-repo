@@ -21,9 +21,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libsmb2-libsmb2-$pkgver
 
-    # Optimizing with default -O2 causes issues.
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DCMAKE_C_FLAGS_RELEASE="-O1" \
 	     -B build \
              -S .
     ${MAKE} -C build

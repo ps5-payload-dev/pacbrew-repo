@@ -26,7 +26,7 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libnfs-libnfs-$pkgver
 
-    export CFLAGS="-Wno-cast-align -O1"
+    export CFLAGS="-Wno-cast-align"
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
 		--without-libkrb5
