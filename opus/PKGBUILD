@@ -22,8 +22,9 @@ build() {
     cd opus-$pkgver
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
-		--enable-static --disable-shared
-    ${MAKE}
+		--enable-static --disable-shared \
+		--enable-custom-modes
+    ${MAKE} V=1
 }
 
 package() {
