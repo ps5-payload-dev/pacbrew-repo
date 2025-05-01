@@ -19,6 +19,7 @@ prepare() {
 
     cd curl-$pkgver
     sed -i 's|define USE_XATTR| |g' src/tool_xattr.h
+    sed -i 's|hg.mozilla.org|hg-edge.mozilla.org|g' scripts/mk-ca-bundle.pl
     autoreconf -fi
 }
 
