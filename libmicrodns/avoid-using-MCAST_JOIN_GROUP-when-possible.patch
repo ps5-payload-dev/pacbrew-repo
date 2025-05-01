@@ -1,0 +1,25 @@
+From d78be8de8ece9d0ed4f3b94d6cbb6714a3b66e26 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?John=20T=C3=B6rnblom?= <john.tornblom@gmail.com>
+Date: Thu, 1 May 2025 15:24:03 +0200
+Subject: [PATCH] avoid using MCAST_JOIN_GROUP when possible
+
+---
+ compat/compat.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/compat/compat.c b/compat/compat.c
+index c4b9dd6..681e3fa 100644
+--- a/compat/compat.c
++++ b/compat/compat.c
+@@ -108,7 +108,7 @@ int
+ os_mcast_join(sock_t s, const struct sockaddr_storage *ss, uint32_t intf_idx,
+               const struct sockaddr_storage* intf_addr)
+ {
+-#ifdef MCAST_JOIN_GROUP
++#if 0
+         (void)intf_addr;
+         struct group_req mgroup;
+ 
+-- 
+2.43.0
+

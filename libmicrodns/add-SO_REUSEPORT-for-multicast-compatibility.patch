@@ -1,0 +1,26 @@
+From 33cdb4d7a08df538e9d60a9c4387f449cb490f03 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?John=20T=C3=B6rnblom?= <john.tornblom@gmail.com>
+Date: Thu, 1 May 2025 14:57:32 +0200
+Subject: [PATCH] Add SO_REUSEPORT for multicast compatibility on some
+ platforms
+
+---
+ src/mdns.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/mdns.c b/src/mdns.c
+index 198654c..41c1434 100644
+--- a/src/mdns.c
++++ b/src/mdns.c
+@@ -495,6 +495,8 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
+                         return mdns_destroy(ctx), (MDNS_NETERR);
+                 if (setsockopt(ctx->conns[i].sock, SOL_SOCKET, SO_REUSEADDR, (const void *) &on_off, sizeof(on_off)) < 0)
+                         return mdns_destroy(ctx), (MDNS_NETERR);
++                if (setsockopt(ctx->conns[i].sock, SOL_SOCKET, SO_REUSEPORT, (const void *) &on_off, sizeof(on_off)) < 0)
++                        return mdns_destroy(ctx), (MDNS_NETERR);
+             /* bind the receiver on any local address */
+             memset(&dumb, 0, sizeof(dumb));
+             dumb.ss.ss_family = ss_family(&ctx->conns[i].intf_addr);
+-- 
+2.43.0
+

@@ -1,0 +1,44 @@
+pkgname=ps5-payload-libmicrodns
+pkgver=git
+pkgrel=1
+pkgdesc='Minimal mDNS resolver library'
+url='https://github.com/videolabs/libmicrodns'
+arch=('any')
+license=('LGPL2.1')
+
+options=(!strip libtool staticlibs)
+source=('git+https://github.com/videolabs/libmicrodns.git'
+	'add-SO_REUSEPORT-for-multicast-compatibility.patch'
+	'avoid-using-MCAST_JOIN_GROUP-when-possible.patch')
+sha256sums=('SKIP'
+	    '9ebb9595285af04493b7ffa613908dd37d510dcca7a2e3bd7caa513b8f4077b3'
+	    'df7b6e071926570d43401a532e679347fcb73a30c00f8143cb0c405d147cca48')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd libmicrodns
+    patch -p1 < $srcdir/add-SO_REUSEPORT-for-multicast-compatibility.patch
+    patch -p1 < $srcdir/avoid-using-MCAST_JOIN_GROUP-when-possible.patch
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libmicrodns
+
+    ${MESON} setup builddir
+    ${MESON} compile -vC builddir
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libmicrodns
+
+    ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_PAYLOAD_SDK}/target"
+}
+
