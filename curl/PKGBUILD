@@ -1,12 +1,12 @@
 pkgname=ps5-payload-curl
-pkgver=8.10.1
+pkgver=8.13.0
 pkgrel=1
 pkgdesc='An URL retrieval utility and library'
 arch=('any')
 url='https://curl.haxx.se'
 license=('curl')
 source=("https://curl.haxx.se/download/curl-${pkgver}.tar.xz")
-sha256sums=('73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee')
+sha256sums=('4a093979a3c2d02de2fbc00549a32771007f2e78032c6faa5ecd2f7a9e152025')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 depends=('ps5-payload-zlib' 'ps5-payload-wolfssl')
