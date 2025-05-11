@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-PKGS=(sdk libmicrohttpd elfldr shsrv websrv klogsrv ftpsrv gdbsrv)
+PKGS=(sdk elfldr shsrv klogsrv ftpsrv gdbsrv
+      libmicrohttpd libmicrodns libsmb2 websrv)
 
 sudo pacman --noconfirm --remove ps5-payload-dev
 
