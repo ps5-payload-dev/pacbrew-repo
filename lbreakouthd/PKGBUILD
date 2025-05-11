@@ -5,6 +5,7 @@ pkgdesc="Scalable 16:9 remake of LBreakout2"
 arch=('any')
 url="http://lgames.sourceforge.net/LBreakoutHD/"
 license=('GPL3')
+options=(!strip libtool staticlibs)
 source=("https://downloads.sourceforge.net/project/lgames/lbreakouthd/lbreakouthd-${pkgver}.tar.gz")
 sha256sums=('SKIP')
 makedepends=('ps5-payload-sdl2_ttf' 'ps5-payload-sdl2_image' 'ps5-payload-sdl2_mixer')

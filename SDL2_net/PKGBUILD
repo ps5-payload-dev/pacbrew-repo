@@ -5,6 +5,7 @@ pkgdesc="A small sample cross-platform networking library (Version 2)"
 arch=('any')
 url="https://github.com/libsdl-org/SDL_net"
 license=('MIT')
+options=(!strip libtool staticlibs)
 source=("https://github.com/libsdl-org/SDL_net/releases/download/release-${pkgver}/SDL2_net-${pkgver}.tar.gz")
 sha256sums=('4e4a891988316271974ff4e9585ed1ef729a123d22c08bd473129179dc857feb')
 groups=('ps5-payload-dev')

@@ -5,6 +5,7 @@ pkgdesc='A portable multi-system emulator'
 arch=('any')
 url='https://mednafen.github.io/'
 license=('GPLv2')
+options=(!strip libtool staticlibs)
 source=("https://mednafen.github.io/releases/files/mednafen-$pkgver.tar.xz")
 sha256sums=('de7eb94ab66212ae7758376524368a8ab208234b33796625ca630547dbc83832')
 makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-flac')

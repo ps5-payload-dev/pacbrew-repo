@@ -5,6 +5,7 @@ pkgdesc="C library for reading, creating, and modifying zip archives"
 url="https://libzip.org"
 license=('BSD')
 arch=('any')
+options=(!strip libtool staticlibs)
 source=("${url}/download/libzip-${pkgver}.tar.xz")
 sha256sums=('5d471308cef4c4752bbcf973d9cd37ba4cb53739116c30349d4764ba1410dfc1')
 

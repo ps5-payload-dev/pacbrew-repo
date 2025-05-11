@@ -5,8 +5,8 @@ pkgdesc='Small UPnP client library/tool to access Internet Gateway Devices'
 url='https://miniupnp.tuxfamily.org/'
 arch=('any')
 license=('BSD')
+options=(!strip libtool staticlibs)
 source=(https://miniupnp.tuxfamily.org/files/miniupnpc-${pkgver}.tar.gz)
-
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')

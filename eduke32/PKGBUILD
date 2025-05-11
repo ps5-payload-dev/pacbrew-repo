@@ -5,6 +5,7 @@ pkgdesc="An advanced Duke Nukem 3D source port"
 arch=('any')
 url="http://eduke32.com/"
 license=('GPL')
+options=(!strip libtool staticlibs)
 source=("http://dukeworld.duke4.net/eduke32/synthesis/20240725-10593-19c21b9ab/eduke32_src_20240725-10593-19c21b9ab.tar.xz")
 sha256sums=('SKIP')
 makedepends=('ps5-payload-sdl2' 'ps5-payload-flac') # 'ps5-payload-libvorbis')

@@ -15,6 +15,7 @@ sha256sums=('6e62c87252e6b3725ba478a1c04dc604aa0aaeec78fedcf4011f1e52548f4cc9'
             'f1d4a017e97f2a43ee4f79ceba7a7c26c068bc29703e8d3a937193b7729260c5'
             'dc7580735db811d67e61fc3a37037f72aabc36c23d074ab98e670b00ad3f4a97')
 
+options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 depends=('ps5-payload-sdl2')
 makedepends=('ps5-payload-sdk')

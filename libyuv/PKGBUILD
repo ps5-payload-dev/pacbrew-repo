@@ -8,6 +8,7 @@ license=(custom)
 _commit=464c51a0353c71f08fe45f683d6a97a638d47833
 source=(git+${url}#commit=${_commit})
 sha256sums=(SKIP)
+options=(!strip libtool staticlibs)
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

@@ -5,6 +5,7 @@ pkgdesc="C++ mathematics library for 3D software based on the OpenGL Shading Lan
 arch=('any')
 license=('MIT')
 url="http://glm.g-truc.net"
+options=(!strip libtool staticlibs)
 source=("https://github.com/g-truc/glm/archive/refs/tags/${pkgver}.tar.gz")
 sha256sums=('SKIP')
 makedepends=('ps5-payload-sdk')
