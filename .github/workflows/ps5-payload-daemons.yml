@@ -45,6 +45,12 @@ jobs:
     - name: Build libmicrohttpd
       run: cd libmicrohttpd && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
+    - name: Build libmicrodns
+      run: cd libmicrodns && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+    - name: Build libsmb2
+      run: cd libsmb2 && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
     - name: Build websrv
       run: cd websrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
