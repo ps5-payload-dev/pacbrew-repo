@@ -9,7 +9,7 @@ source=("https://curl.haxx.se/download/curl-${pkgver}.tar.xz")
 sha256sums=('4a093979a3c2d02de2fbc00549a32771007f2e78032c6faa5ecd2f7a9e152025')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
-depends=('ps5-payload-zlib' 'ps5-payload-wolfssl')
+depends=('ps5-payload-zlib' 'ps5-payload-libressl')
 makedepends=('ps5-payload-sdk')
 
 prepare() {
@@ -32,7 +32,7 @@ build() {
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
-		--with-wolfssl \
+		--with-openssl \
 		--with-ca-bundle="${PREFIX}/etc/ca-bundle.crt" \
 		--disable-docs
     ${MAKE}

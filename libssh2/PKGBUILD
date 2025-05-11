@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://www.libssh2.org/download/libssh2-$pkgver.tar.gz")
 sha256sums=('d9ec76cbe34db98eec3539fe2c899d26b0c837cb3eb466a56b0f109cabf658f7')
 makedepends=('ps5-payload-sdk')
-depends=('ps5-payload-mbedtls' 'ps5-payload-zlib')
+depends=('ps5-payload-libressl' 'ps5-payload-zlib')
 groups=('ps5-payload-dev')
 
 prepare() {
