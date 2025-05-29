@@ -1,12 +1,12 @@
 pkgname=ps5-payload-luajit
-pkgver=2.1
+pkgver=2.1.1748459687
 pkgrel=1
 pkgdesc='Just-in-time compiler and drop-in replacement for Lua 5.1'
 arch=('any')
 url='https://luajit.org/'
 license=('MIT')
 options=(!strip libtool staticlibs)
-source=("git+https://github.com/LuaJIT/LuaJIT.git")
+source=("git+https://github.com/LuaJIT/LuaJIT.git#commit=f9140a622a0c44a99efb391cc1c2358bc8098ab7")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
 
