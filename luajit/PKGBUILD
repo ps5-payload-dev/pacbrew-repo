@@ -1,0 +1,42 @@
+pkgname=ps5-payload-luajit
+pkgver=2.1
+pkgrel=1
+pkgdesc='Just-in-time compiler and drop-in replacement for Lua 5.1'
+arch=('any')
+url='https://luajit.org/'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("git+https://github.com/LuaJIT/LuaJIT.git")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd LuaJIT
+    # LuaJIT actually supports the ps5, but will disable
+    # ffi which the payload sdk supports.
+    sed -i 's|__PROSPERO__|__JUNK__|g' src/lj_arch.h
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd LuaJIT
+
+    ${MAKE} amalg BUILDMODE=static \
+	    CROSS="${PS5_PAYLOAD_SDK}/bin/prospero-" \
+	    DEFAULT_CC="clang" TARGET_LIBS="-lunwind" Q=
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd LuaJIT
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install PREFIX="${PREFIX}"
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
