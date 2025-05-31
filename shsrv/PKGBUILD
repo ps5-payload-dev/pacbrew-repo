@@ -28,6 +28,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd shsrv
 
-    install -Dm 755 host_tools/prospero-shell -t "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/"
+    install -Dm 755 host/prospero-shsrv-shell -t "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/"
     install -Dm 755 shsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
 }
