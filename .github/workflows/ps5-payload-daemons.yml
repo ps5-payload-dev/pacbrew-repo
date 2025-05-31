@@ -21,7 +21,7 @@ jobs:
     - name: Setup
       run: |
         sudo apt update
-        sudo apt install build-essential clang-15 lld-15 meson
+        sudo apt install build-essential clang-18 lld-18 meson
         sudo apt install git curl libarchive-tools makepkg pacman-package-manager
 
     - name: Build sdk
