@@ -29,5 +29,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd websrv
 
+    install -Dm 755 host/prospero-websrv-elfldr -t "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/"
     install -Dm 755 websrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
 }

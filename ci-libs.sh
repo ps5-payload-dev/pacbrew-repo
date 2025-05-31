@@ -18,6 +18,7 @@ PKGS=(sdk openlibm libcxx fast_float
       enet glm
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       imgui lua luajit curl ffmpeg SDL2_kitchensink
+      websrv # for prospero-websrv-elfldr
      )
 
 sudo pacman --noconfirm --remove ps5-payload-dev
