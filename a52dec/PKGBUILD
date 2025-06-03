@@ -5,8 +5,8 @@ pkgdesc='Library for decoding ATSC A/52 (AC-3) audio streams'
 arch=('any')
 url='https://git.adelielinux.org/community/a52dec/'
 license=('GPL-2.0-or-later')
-source=("https://mirrors.slackware.com/slackware/slackware64-current/slackware64/l/a52dec-$pkgver-x86_64-1.txz")
-sha256sums=('dfeecce4f7ab1367bc39280c46a325b0aa035341b8da83e1f5ca28f278bf1a60')
+source=("https://distfiles.adelielinux.org/source/a52dec/a52dec-$pkgver.tar.gz")
+sha256sums=('03c181ce9c3fe0d2f5130de18dab9bd8bc63c354071515aa56983c74a9cffcc9')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
@@ -16,13 +16,13 @@ prepare() {
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
 
-    cd a52dec-v$pkgver
+    cd a52dec-$pkgver
     autoreconf -fi
 }
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd a52dec-v$pkgver
+    cd a52dec-$pkgver
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared \
@@ -32,7 +32,7 @@ build() {
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd a52dec-v$pkgver
+    cd a52dec-$pkgver
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
     make install
