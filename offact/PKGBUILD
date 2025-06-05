@@ -33,6 +33,7 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd offact
 
-    mv OffAct.elf offact
-    install -Dm 755 offact -t "${pkgdir}/${DESTDIR}/${PREFIX}/bin"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    export PREFIX="/user/data/homebrew"
+    ${MAKE} install
 }
