@@ -33,6 +33,7 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd LakeSnes
 
-    install -Dm755 lakesnes \
-	    "${pkgdir}/${DESTDIR}/${PREFIX}/bin/lakesnes"
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    export PREFIX="/user/data/homebrew"
+    ${MAKE} -f Makefile.prospero install
 }
