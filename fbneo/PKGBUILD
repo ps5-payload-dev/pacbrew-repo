@@ -17,6 +17,11 @@ prepare() {
     fi
 }
 
+pkgver() {
+    cd FBNeo
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd FBNeo
