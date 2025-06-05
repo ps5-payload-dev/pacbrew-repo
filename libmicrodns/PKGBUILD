@@ -27,6 +27,11 @@ prepare() {
     patch -p1 < $srcdir/avoid-using-MCAST_JOIN_GROUP-when-possible.patch
 }
 
+pkgver() {
+    cd libmicrodns
+    git describe --tags --long | sed 's/^[^0-9]*//; s/\([^-]*-g\)/r\1/; s/-/./g'
+}
+
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libmicrodns
