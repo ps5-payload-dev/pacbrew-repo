@@ -1,5 +1,5 @@
 pkgname=ps5-payload-osmesa
-pkgver=7.0.4.git
+pkgver=7.0.4
 pkgrel=1
 pkgdesc='Library providing Mesa3d 7.0.4 swrast and osmesa capabilities.'
 arch=('any')
