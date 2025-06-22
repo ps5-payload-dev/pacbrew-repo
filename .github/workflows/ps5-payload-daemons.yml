@@ -58,7 +58,9 @@ jobs:
       run: pacman --info -Q > version-info.txt && sudo mv version-info.txt /opt/ps5-payload-sdk/target/user/homebrew/sbin/
 
     - name: Compress artifacts
-      run: zip -r ps5-payload-daemons.zip /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.*
+      run: |
+        cd /opt/ps5-payload-sdk/target/user/homebrew/sbin/
+        zip -r ps5-payload-daemons.zip *.*
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
