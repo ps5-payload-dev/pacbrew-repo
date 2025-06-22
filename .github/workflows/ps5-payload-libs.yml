@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
 
     - name: Checkout
@@ -26,15 +26,15 @@ jobs:
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager python3-mako
 
-    - name: Build Libs
+    - name: Build artifacts
       run: bash ci-libs.sh
 
-    - name: Package Libs
-      run: tar -czf ps5-payload-libs.tar.gz -C / opt/ps5-payload-sdk
+    - name: Package artifacts
+      run: tar -czf ps5-payload-dev.tar.gz -C / opt/ps5-payload-sdk
 
-    - name: Upload Libs
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ps5-payload-libs
-        path: ./ps5-payload-libs.tar.gz
+        name: artifacts
+        path: ./ps5-payload-dev.tar.gz
         if-no-files-found: error
