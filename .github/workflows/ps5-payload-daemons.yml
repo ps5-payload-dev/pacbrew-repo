@@ -57,9 +57,12 @@ jobs:
     - name: Generate Version Info
       run: pacman --info -Q > version-info.txt && sudo mv version-info.txt /opt/ps5-payload-sdk/target/user/homebrew/sbin/
 
-    - name: Upload
+    - name: Compress artifacts
+      run: zip -r $GITHUB_WORKSPACE/ps5-payload-daemons.zip /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.*
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ps5-payload-daemons
-        path: /opt/ps5-payload-sdk/target/user/homebrew/sbin/*.*
+        name: artifacts
+        path: $GITHUB_WORKSPACE/ps5-payload-daemons.zip
         if-no-files-found: error
