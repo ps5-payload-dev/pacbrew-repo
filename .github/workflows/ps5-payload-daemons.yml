@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
 
     - name: Checkout
@@ -54,7 +54,7 @@ jobs:
     - name: Build websrv
       run: cd websrv && makepkg && sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
-    - name: Generate Version Info
+    - name: Generate version Info
       run: pacman --info -Q > version-info.txt && sudo mv version-info.txt /opt/ps5-payload-sdk/target/user/homebrew/sbin/
 
     - name: Compress artifacts
