@@ -22,7 +22,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt install cmake pkg-config meson clang-18 lld-18
-        sudo apt install build-essential autoconf libtool yasm nasm
+        sudo apt install build-essential autoconf libtool yasm nasm bison flex
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager python3-mako
 
