@@ -1,12 +1,12 @@
 pkgname=ps5-payload-curl
-pkgver=8.14.1
+pkgver=8.13.0
 pkgrel=1
 pkgdesc='An URL retrieval utility and library'
 arch=('any')
 url='https://curl.haxx.se'
 license=('curl')
 source=("https://curl.haxx.se/download/curl-${pkgver}.tar.xz")
-sha256sums=('f4619a1e2474c4bbfedc88a7c2191209c8334b48fa1f4e53fd584cc12e9120dd')
+sha256sums=('4a093979a3c2d02de2fbc00549a32771007f2e78032c6faa5ecd2f7a9e152025')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 depends=('ps5-payload-zlib' 'ps5-payload-libressl')
@@ -19,6 +19,7 @@ prepare() {
 
     cd curl-$pkgver
     sed -i 's|define USE_XATTR| |g' src/tool_xattr.h
+    sed -i 's|hg.mozilla.org|hg-edge.mozilla.org|g' scripts/mk-ca-bundle.pl
     autoreconf -fi
 }
 
