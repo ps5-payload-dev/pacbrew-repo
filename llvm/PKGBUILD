@@ -17,13 +17,13 @@ prepare() {
     fi
 
     cd llvm-project-$pkgver.src
-    sed -i 's|static_assert(|static_assert(1 or |g' llvm/lib/Support/SmallVector.cpp # TODO
-
     cmake -S llvm -B host \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS=""
-
     make -C host llvm-tblgen
+
+    sed -i 's|static_assert(|static_assert(1 or |g' llvm/lib/Support/SmallVector.cpp # TODO
+    sed -i 's|add_llvm_implicit_projects()||g' llvm/tools/CMakeLists.txt
 }
 
 build() {
@@ -33,6 +33,7 @@ build() {
     LLVM_BINDIR=$("${PS5_PAYLOAD_SDK}/bin/llvm-config" --bindir)
     ${CMAKE} -S llvm -B build  \
 	     -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=YES \
 	     -DLLVM_HOST_TRIPLE=x86_64-sie-ps5 \
 	     -DLLVM_TARGETS_TO_BUILD="X86" \
 	     -DLLVM_ENABLE_PROJECTS="" \
