@@ -21,9 +21,11 @@ build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd libogg-$pkgver
 
-    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
-		--enable-static --disable-shared
-    ${MAKE}
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+
 }
 
 package() {
@@ -31,7 +33,7 @@ package() {
     cd libogg-$pkgver
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
-    make install
+    ${MAKE} -C build install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }
