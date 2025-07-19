@@ -14,7 +14,7 @@ PKGS=(sdk openlibm libcxx fast_float
       libsamplerate libsodium libogg libvorbis flac opus
       mpg123 lame libmad faad2 libsndfile
       libass
-      libvpx libtheora # libmpeg2 TODO: https://libmpeg2.sourceforge.io is having issue
+      libvpx libmpeg2 libtheora
       enet glm
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       imgui lua luajit curl ffmpeg SDL2_kitchensink
