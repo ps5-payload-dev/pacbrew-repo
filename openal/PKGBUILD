@@ -1,0 +1,48 @@
+pkgname=ps5-payload-openal
+pkgver=1.24.3
+pkgrel=1
+pkgdesc='Cross-platform 3D audio library, software implementation'
+arch=('any')
+url='https://github.com/kcat/openal-soft'
+license=('LGPL-2.0-or-later')
+options=(!strip libtool staticlibs)
+source=("https://github.com/kcat/openal-soft/archive/refs/tags/$pkgver.tar.gz")
+sha256sums=('7e1fecdeb45e7f78722b776c5cf30bd33934b961d7fd2a11e0494e064cc631ce')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd openal-soft-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DALSOFT_DLOPEN=NO \
+	     -DALSOFT_BACKEND_SDL2=YES \
+	     -DALSOFT_REQUIRE_SDL2=YES \
+	     -DALSOFT_BACKEND_WAVE=NO \
+	     -DALSOFT_BACKEND_OSS=NO \
+	     -DALSOFT_UTILS=NO \
+	     -DALSOFT_NO_CONFIG_UTIL=YES \
+	     -DALSOFT_EXAMPLES=NO \
+	     -DLIBTYPE="STATIC" \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd openal-soft-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
