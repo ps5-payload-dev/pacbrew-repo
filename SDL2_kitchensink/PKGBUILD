@@ -1,12 +1,13 @@
 pkgname=ps5-payload-sdl2_kitchensink
-pkgver=1.0.12
+pkgver=git
 pkgrel=1
 pkgdesc="FFmpeg and SDL2 based library for audio and video playback, written in C99."
 arch=('any')
 url="https://katajakasa.github.io/SDL_kitchensink/"
 license=('MIT')
-source=("https://github.com/katajakasa/SDL_kitchensink/archive/refs/tags/$pkgver.tar.gz")
-sha256sums=('e9b5406b68434cd50fa209aacbf8aefe83e76e9feacfaaf306e018a56b333970')
+source=('git+https://github.com/katajakasa/SDL_kitchensink.git#branch=v2')
+sha256sums=('SKIP')
+
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
@@ -18,9 +19,14 @@ prepare() {
     fi
 }
 
+pkgver() {
+    cd SDL_kitchensink
+    printf "2.0.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd SDL_kitchensink-$pkgver
+    cd SDL_kitchensink
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DBUILD_STATIC=YES \
@@ -32,8 +38,11 @@ build() {
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd SDL_kitchensink-$pkgver
+    cd SDL_kitchensink
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} -C build install
+
+    cd $DESTDIR/$PREFIX/lib
+    ln -s libSDL_kitchensink_static.a libSDL_kitchensink.a
 }
