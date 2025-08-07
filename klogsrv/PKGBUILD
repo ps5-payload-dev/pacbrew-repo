@@ -33,5 +33,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd klogsrv
 
-    install -Dm 755 klogsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+    mkdir -p "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+    cp klogsrv-ps5.elf "${pkgdir}/${DESTDIR}/${PREFIX}/sbin/klogsrv.elf"
 }
