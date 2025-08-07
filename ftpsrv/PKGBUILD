@@ -33,5 +33,6 @@ package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd ftpsrv
 
-    install -Dm 755 ftpsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+    mkdir -p "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+    cp ftpsrv-ps5.elf "${pkgdir}/${DESTDIR}/${PREFIX}/sbin/ftpsrv.elf"
 }
