@@ -1,11 +1,12 @@
 pkgname=ps5-payload-sdl2_kitchensink
-pkgver=git
+pkgver=2.0.0
+_tagsuffix="-a2"
 pkgrel=1
 pkgdesc="FFmpeg and SDL2 based library for audio and video playback, written in C99."
 arch=('any')
 url="https://katajakasa.github.io/SDL_kitchensink/"
 license=('MIT')
-source=('git+https://github.com/katajakasa/SDL_kitchensink.git#branch=v2')
+source=("https://github.com/katajakasa/SDL_kitchensink/archive/refs/tags/$pkgver$_tagsuffix.tar.gz")
 sha256sums=('SKIP')
 
 options=(!strip libtool staticlibs)
@@ -19,14 +20,9 @@ prepare() {
     fi
 }
 
-pkgver() {
-    cd SDL_kitchensink
-    printf "2.0.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
-}
-
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd SDL_kitchensink
+    cd SDL_kitchensink-$pkgver$_tagsuffix
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DBUILD_STATIC=YES \
@@ -38,7 +34,7 @@ build() {
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd SDL_kitchensink
+    cd SDL_kitchensink-$pkgver$_tagsuffix
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} -C build install
