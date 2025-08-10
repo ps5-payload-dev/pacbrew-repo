@@ -19,7 +19,6 @@ prepare() {
     fi
     cd osmesa
     sed -i 's|add_library(osmesa SHARED|add_library(osmesa|g' src/CMakeLists.txt
-    sed -i 's|add_library(glu SHARED|add_library(glu|g' examples/glu/CMakeLists.txt
 }
 
 build() {
