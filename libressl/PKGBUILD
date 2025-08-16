@@ -1,5 +1,5 @@
 pkgname=ps5-payload-libressl
-pkgver=4.0.0
+pkgver=4.1.0
 pkgrel=1
 pkgdesc='Free version of the TLS/crypto stack forked from OpenSSL.'
 arch=('any')
@@ -8,7 +8,7 @@ url="https://www.libressl.org/"
 license=(ISC custom:OpenSSL)
 options=(!strip libtool staticlibs)
 source=("https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${pkgver}.tar.gz")
-sha256sums=('4d841955f0acc3dfc71d0e3dd35f283af461222350e26843fea9731c0246a1e4')
+sha256sums=('0f71c16bd34bdaaccdcb96a5d94a4921bfb612ec6e0eba7a80d8854eefd8bb61')
 
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
