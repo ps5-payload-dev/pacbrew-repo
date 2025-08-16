@@ -1,0 +1,40 @@
+pkgname=ps5-payload-libssh
+pkgver=0.11.2
+pkgrel=1
+pkgdesc='Library for accessing ssh client services through C libraries'
+url='https://www.libssh.org/'
+license=('LGPL-2.1-or-later')
+arch=('any')
+options=(!strip libtool staticlibs)
+source=("https://www.libssh.org/files/${pkgver%.*}/libssh-${pkgver}.tar.xz")
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+depends=('ps5-payload-zlib' 'ps5-payload-openssl')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libssh-$pkgver
+    
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DWITH_EXAMPLES=NO \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libssh-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
