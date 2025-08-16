@@ -34,5 +34,5 @@ package() {
     cd shsrv
 
     install -Dm 755 host/prospero-shsrv-shell -t "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/"
-    install -Dm 755 shsrv.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
+    install -Dm 755 shsrv-ps5.elf -t "${pkgdir}/${DESTDIR}/${PREFIX}/sbin/shsrv.elf"
 }
