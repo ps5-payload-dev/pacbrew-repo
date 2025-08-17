@@ -6,8 +6,16 @@ arch=('any')
 url="https://clang.llvm.org/"
 license=('Apache-2.0 WITH LLVM-exception')
 options=(!strip libtool staticlibs)
-source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-project-$pkgver.src.tar.xz")
-sha256sums=('8b3cfd7bc695bd6cea0f37f53f0981f34f87496e79e2529874fd03a2f9dd3a8a')
+source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-project-$pkgver.src.tar.xz"
+        "0022-ADT-Add-cstdint-to-SmallVector-101761.patch"
+        "0023-AMDGPU-Include-cstdint-in-AMDGPUMCTargetDesc-101766.patch"
+        "0024-Another-gcc-15-fix-from-Sam-James.patch"
+        "0025-include-cstdint.patch")
+sha256sums=('8b3cfd7bc695bd6cea0f37f53f0981f34f87496e79e2529874fd03a2f9dd3a8a'
+            'dc4a9be30bf281f340c2f8142c6bcc885a208906661c52eff9b11993bcdc7b00'
+            '3a690c2fd6b9bc9ac575db7067699787f6d07b21c5d43accba6bdf3335dadad3'
+            '1b7d7b8d1cdaa6c4fc1d76f6cc339fe1e5b4d3a99a0cce847dff81464fb7e938'
+            'd3ffc972a7b88dbe2d9ff1fad6e9ab9042c22d48faf2041f5fb7524b86cef1bd')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk')
 
@@ -17,6 +25,14 @@ prepare() {
     fi
 
     cd llvm-project-$pkgver.src
+
+    # Include cstdint; fixes building with GCC 15
+    # https://dev.gentoo.org/~mgorny/dist/llvm/llvm-gentoo-patchset-15.0.7-r7.tar.xz
+    patch -Np1 -i ../0022-ADT-Add-cstdint-to-SmallVector-101761.patch
+    patch -Np1 -i ../0023-AMDGPU-Include-cstdint-in-AMDGPUMCTargetDesc-101766.patch
+    patch -Np1 -i ../0024-Another-gcc-15-fix-from-Sam-James.patch
+    patch -Np1 -i ../0025-include-cstdint.patch
+
     cmake -S llvm -B host \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS=""
