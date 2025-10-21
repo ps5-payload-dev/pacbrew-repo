@@ -18,6 +18,9 @@ prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
+
+    cd SDL_kitchensink-$pkgver$_tagsuffix
+    sed -i 's|double pts = Kit_GetCurrentPTS(decoder);|double pts = Kit_GetCurrentPTS(decoder)+0.1;|g' src/internal/video/kitvideo.c
 }
 
 build() {
