@@ -19,9 +19,14 @@ prepare() {
 }
 
 build() {
-    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd file-$pkgver
 
+    # When cross-compiling, build system needs the same version of file as the target
+    ./configure --prefix="$PWD/host"
+    make install V=1
+    export FILE_COMPILE=$PWD/host/bin/file
+
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared
     ${MAKE} V=1
