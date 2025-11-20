@@ -24,7 +24,7 @@ build() {
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static --disable-shared
-    ${MAKE}
+    ${MAKE} V=1
 }
 
 package() {
@@ -32,7 +32,7 @@ package() {
     cd file-$pkgver
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
-    make install
+    ${MAKE} install
 
     ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
 }
