@@ -35,5 +35,6 @@ package() {
     cd websrv
 
     install -Dm 755 host/prospero-websrv-elfldr -t "${pkgdir}/${PS5_PAYLOAD_SDK}/bin/"
+    mkdir -p "${pkgdir}/${DESTDIR}/${PREFIX}/sbin"
     cp websrv-ps5.elf "${pkgdir}/${DESTDIR}/${PREFIX}/sbin/websrv.elf"
 }
