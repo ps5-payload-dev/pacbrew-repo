@@ -1,0 +1,44 @@
+pkgname=ps5-payload-libutp
+pkgver=r207.490874c
+pkgrel=1
+pkgdesc='uTorrent Transport Protocol library'
+url='https://github.com/bittorrent/libutp'
+arch=('any')
+license=('custom:Public Domain')
+options=(!strip libtool staticlibs)
+source=(git+https://github.com/transmission/libutp.git)
+sha256sums=('SKIP')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+pkgver() {
+    cd libutp
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libutp
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DLIBUTP_BUILD_PROGRAMS=OFF \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd libutp
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
