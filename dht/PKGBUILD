@@ -1,0 +1,43 @@
+pkgname=ps5-payload-dht
+pkgver=0.27
+pkgrel=1
+pkgdesc='BitTorrent DHT library'
+arch=('any')
+url='https://github.com/jech/dht'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=(https://github.com/jech/dht/archive/refs/tags/dht-$pkgver.tar.gz
+        dht-cmake.patch::https://github.com/transmission/dht/commit/b02da598.patch)
+sha256sums=('caba469a784a5c359c084099fdc025cfe09b1faec2ba9ba257b7384351c43c0a'
+            '91fb75029bf04456bb7fd9c7cc14d544e906d35a309cc8de5be081049aeb7649')
+
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+    patch -d dht-dht-$pkgver -p1 < dht-cmake.patch # Add cmake support
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd dht-dht-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DCMAKE_INSTALL_INCLUDEDIR=include/dht \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd dht-dht-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}

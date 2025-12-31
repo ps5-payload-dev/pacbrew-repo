@@ -16,6 +16,7 @@ PKGS=(sdk openlibm libcxx fast_float
       libass
       libvpx libmpeg2 libtheora
       enet glm
+      dht
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       imgui lua luajit curl ffmpeg SDL2_kitchensink
       # llvm mesa
