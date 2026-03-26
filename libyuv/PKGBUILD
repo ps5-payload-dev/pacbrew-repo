@@ -1,24 +1,22 @@
 pkgname=ps5-payload-libyuv
-pkgver=r2426+464c51a0
+pkgver=r2828+ce488afb
 pkgrel=1
 pkgdesc="Library for YUV scaling"
 arch=('any')
 url="https://chromium.googlesource.com/libyuv/libyuv/"
 license=(custom)
-_commit=464c51a0353c71f08fe45f683d6a97a638d47833
-source=(git+${url}#commit=${_commit})
-sha256sums=(SKIP)
+_commit=ce488afb7b1a1d9279ddeddb3fcade534d741c81
+source=(git+${url}#commit=${_commit}
+        0001-Do-not-build-shared-libraries.patch)
+sha256sums=(SKIP
+            1106101935d0343538dd1399c5cf87c9534468b392cfc2ec8627e2e34553b096)
 options=(!strip libtool staticlibs)
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
-    sed -i '33s/^/#/' libyuv/CMakeLists.txt
-    sed -i '34s/^/#/' libyuv/CMakeLists.txt
-    sed -i '35s/^/#/' libyuv/CMakeLists.txt
-    sed -i '51s/^/#/' libyuv/CMakeLists.txt
-    sed -i '96s/^/#/' libyuv/CMakeLists.txt
+    patch -Np1 -d libyuv -i ../0001-Do-not-build-shared-libraries.patch
 }
 
 build() {
