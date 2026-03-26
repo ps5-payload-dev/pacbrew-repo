@@ -1,0 +1,55 @@
+From b77e049e802091f8ed8e2cf377409d4e9fd62444 Mon Sep 17 00:00:00 2001
+From: Matthew Vanek <matt@rootless.net>
+Date: Thu, 26 Mar 2026 15:57:15 -0500
+Subject: [PATCH] Do not build shared libraries
+
+---
+ CMakeLists.txt | 11 -----------
+ 1 file changed, 11 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7aa1549b..dc421964 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -14,7 +14,6 @@ set ( ly_inc_dir	${ly_base_dir}/include )
+ set ( ly_tst_dir	${ly_base_dir}/unit_test )
+ set ( ly_lib_name	yuv )
+ set ( ly_lib_static	${ly_lib_name} )
+-set ( ly_lib_shared	${ly_lib_name}_shared )
+ 
+ # We cannot use GLOB here since we want to be able to separate out files that
+ # need particular flags to enable architecture extensions like AArch64's SVE.
+@@ -176,14 +175,6 @@ endif()
+ # this creates the static library (.a)
+ add_library( ${ly_lib_static} STATIC ${ly_lib_parts})
+ 
+-# this creates the shared library (.so)
+-add_library( ${ly_lib_shared} SHARED ${ly_lib_parts})
+-set_target_properties( ${ly_lib_shared} PROPERTIES OUTPUT_NAME "${ly_lib_name}" )
+-set_target_properties( ${ly_lib_shared} PROPERTIES PREFIX "lib" )
+-if(WIN32)
+-  set_target_properties( ${ly_lib_shared} PROPERTIES IMPORT_PREFIX "lib" )
+-endif()
+-
+ # this creates the cpuid tool
+ add_executable      ( cpuid ${ly_base_dir}/util/cpuid.c )
+ target_link_libraries  ( cpuid ${ly_lib_static} )
+@@ -199,7 +190,6 @@ target_link_libraries  ( yuvconstants ${ly_lib_static} )
+ find_package ( JPEG )
+ if (JPEG_FOUND)
+   include_directories( ${JPEG_INCLUDE_DIR} )
+-  target_link_libraries( ${ly_lib_shared} ${JPEG_LIBRARY} )
+   add_definitions( -DHAVE_JPEG )
+ endif()
+ 
+@@ -248,7 +238,6 @@ endif()
+ # install the conversion tool, .so, .a, and all the header files
+ install ( TARGETS yuvconvert DESTINATION bin )
+ install ( TARGETS ${ly_lib_static}						DESTINATION lib )
+-install ( TARGETS ${ly_lib_shared} LIBRARY DESTINATION lib RUNTIME DESTINATION bin ARCHIVE DESTINATION lib )
+ install ( DIRECTORY ${PROJECT_SOURCE_DIR}/include/		DESTINATION include )
+ 
+ # create the .deb and .rpm packages using cpack
+-- 
+2.53.0
+
