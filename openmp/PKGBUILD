@@ -1,4 +1,4 @@
-pkgname=openmp
+pkgname=ps5-payload-openmp
 pkgver=18.1.8
 pkgrel=1
 pkgdesc="LLVM OpenMP Runtime Library"
