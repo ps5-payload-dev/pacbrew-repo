@@ -1,0 +1,40 @@
+pkgname=openmp
+pkgver=18.1.8
+pkgrel=1
+pkgdesc="LLVM OpenMP Runtime Library"
+arch=(any)
+url="https://openmp.llvm.org/"
+license=('Apache2')
+options=(!strip libtool staticlibs)
+source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-${pkgver}/llvm-project-${pkgver}.src.tar.xz")
+sha256sums=('0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd llvm-project-$pkgver.src
+
+    ${CMAKE} -S runtimes -B build \
+	     -DCMAKE_INSTALL_PREFIX="${PS5_PAYLOAD_SDK}/target" \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DLLVM_ENABLE_RUNTIMES="openmp" \
+	     -DLIBOMP_ENABLE_SHARED=NO \
+	     -DOPENMP_STANDALONE_BUILD=YES \
+	     -DOPENMP_ENABLE_LIBOMPTARGET=NO \
+	     -DOPENMP_ENABLE_OMPT_TOOLS=NO
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd llvm-project-$pkgver.src
+
+    ${MAKE} -C build install DESTDIR="${pkgdir}"
+}
