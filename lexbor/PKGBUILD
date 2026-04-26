@@ -1,0 +1,41 @@
+pkgname=ps5-payload-lexbor
+pkgver=3.0.0
+pkgrel=1
+pkgdesc='A set of fast, standards-compliant tools for working with modern web technologies'
+arch=('any')
+url='https://lexbor.com'
+license=('Apache-2.0')
+options=(!strip libtool staticlibs)
+source=("https://github.com/lexbor/lexbor/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('eafaa79ef9871f0bbb1978eda8677d184f7ecdcaa203d7cd25b3f86e32c014c2')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lexbor-$pkgver
+
+    ${CMAKE} -B build -S . \
+	     -DCMAKE_BUILD_TYPE=Release \
+	     -DLEXBOR_BUILD_STATIC=YES \
+	     -DLEXBOR_INSTALL_HEADERS=YES \
+	     -DLEXBOR_BUILD_SHARED=NO \
+	     -DLEXBOR_BUILD_TESTS=NO \
+	     -DLEXBOR_BUILD_TESTS_CPP=NO
+
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd lexbor-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+}
