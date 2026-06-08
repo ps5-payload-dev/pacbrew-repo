@@ -17,7 +17,7 @@ sha256sums=('8b3cfd7bc695bd6cea0f37f53f0981f34f87496e79e2529874fd03a2f9dd3a8a'
             '1b7d7b8d1cdaa6c4fc1d76f6cc339fe1e5b4d3a99a0cce847dff81464fb7e938'
             'd3ffc972a7b88dbe2d9ff1fad6e9ab9042c22d48faf2041f5fb7524b86cef1bd')
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx' 'ps5-payload-openlibm')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

@@ -9,7 +9,7 @@ source=("https://ftp.osuosl.org/pub/xiph/releases/vorbis/libvorbis-$pkgver.tar.g
 sha256sums=('0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx' 'ps5-payload-libogg')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

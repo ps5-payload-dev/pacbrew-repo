@@ -8,6 +8,7 @@ license=(zlib)
 source=("https://www.ferzkopp.net/Software/SDL2_gfx/SDL2_gfx-${pkgver}.tar.gz")
 sha256sums=('63e0e01addedc9df2f85b93a248f06e8a04affa014a835c2ea34bfe34e576262')
 options=(!strip libtool staticlibs)
+makedepends=('ps5-payload-sdk')
 depends=('ps5-payload-sdl2')
 groups=('ps5-payload-dev' 'ps5-payload-sdl2')
 

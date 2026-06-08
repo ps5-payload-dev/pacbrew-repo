@@ -9,7 +9,7 @@ source=("https://distfiles.adelielinux.org/source/a52dec/a52dec-$pkgver.tar.gz")
 sha256sums=('03c181ce9c3fe0d2f5130de18dab9bd8bc63c354071515aa56983c74a9cffcc9')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

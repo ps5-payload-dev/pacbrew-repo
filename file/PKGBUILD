@@ -8,7 +8,7 @@ url='https://www.darwinsys.com/file/'
 options=(!strip libtool staticlibs)
 source=("https://astron.com/pub/file/file-$pkgver.tar.gz")
 sha256sums=('c9cc77c7c560c543135edc555af609d5619dbef011997e988ce40a3d75d86088')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
 depends=('ps5-payload-zlib' 'ps5-payload-xz' 'ps5-payload-bzip2')
 groups=('ps5-payload-dev')
 

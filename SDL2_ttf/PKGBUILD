@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("${url}/release/SDL2_ttf-${pkgver}.tar.gz")
 sha256sums=('d48cbd1ce475b9e178206bf3b72d56b66d84d44f64ac05803328396234d67723')
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
 depends=('ps5-payload-sdl2' 'ps5-payload-freetype' 'ps5-payload-harfbuzz')
 
 prepare() {

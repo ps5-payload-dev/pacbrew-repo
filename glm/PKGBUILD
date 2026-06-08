@@ -8,7 +8,7 @@ url="http://glm.g-truc.net"
 options=(!strip libtool staticlibs)
 source=("https://github.com/g-truc/glm/archive/refs/tags/${pkgver}.tar.gz")
 sha256sums=('SKIP')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
 groups=('ps5-payload-dev')
 
 

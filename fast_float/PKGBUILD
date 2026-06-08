@@ -9,7 +9,7 @@ source=("$url/archive/v$pkgver.tar.gz")
 sha256sums=('4458aae4b0eb55717968edda42987cabf5f7fc737aee8fede87a70035dba9ab0')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

@@ -9,7 +9,7 @@ source=("https://codeberg.org/tenacityteam/libmad/releases/download/${pkgver}/li
 sha256sums=('0f6bfb36c554075494b5fc2c646d08de7364819540f23bab30ae73fa1b5cfe65')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
 
 
 prepare() {

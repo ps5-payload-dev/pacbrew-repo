@@ -8,6 +8,7 @@ url="https://www.sqlite.org/"
 options=(!strip libtool staticlibs)
 source=(https://www.sqlite.org/2024/sqlite-src-3460100.zip)
 sha256sums=('SKIP')
+makedepends=('ps5-payload-sdk')
 
 groups=('ps5-payload-dev')
 

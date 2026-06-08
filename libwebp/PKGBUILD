@@ -8,7 +8,7 @@ license=('BSD')
 options=(!strip libtool staticlibs)
 source=("https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$pkgver.tar.gz")
 sha256sums=('61f873ec69e3be1b99535634340d5bde750b2e4447caa1db9f61be3fd49ab1e5')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
 depends=('ps5-payload-zlib')
 groups=('ps5-payload-dev')
 

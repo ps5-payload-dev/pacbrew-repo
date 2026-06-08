@@ -9,6 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://github.com/json-c/json-c/archive/refs/tags/json-c-0.17-20230812.tar.gz")
 sha256sums=('024d302a3aadcbf9f78735320a6d5aedf8b77876c8ac8bbb95081ca55054c7eb')
 groups=('ps5-payload-dev')
+makedepends=('ps5-payload-openlibm')
 depends=('ps5-payload-sdk')
 
 prepare() {

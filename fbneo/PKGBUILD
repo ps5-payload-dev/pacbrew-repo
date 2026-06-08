@@ -7,7 +7,7 @@ license=('custom')
 url="https://github.com/ps5-payload-dev/FBNeo"
 source=("git+https://github.com/ps5-payload-dev/FBNeo.git#branch=ps5")
 sha256sums=('SKIP')
-makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-sdl2_image')
+makedepends=('ps5-payload-sdk' 'ps5-payload-sdl2' 'ps5-payload-sdl2_image' 'ps5-payload-libcxx' 'ps5-payload-openlibm')
 groups=('ps5-payload-dev' 'ps5-payload-game')
 options=(!strip libtool staticlibs)
 

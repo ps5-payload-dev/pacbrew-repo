@@ -9,6 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://github.com/ebiggers/libdeflate/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

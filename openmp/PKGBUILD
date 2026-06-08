@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://github.com/llvm/llvm-project/releases/download/llvmorg-${pkgver}/llvm-project-${pkgver}.src.tar.xz")
 sha256sums=('0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a')
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then

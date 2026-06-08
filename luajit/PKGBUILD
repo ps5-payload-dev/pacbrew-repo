@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("git+https://github.com/LuaJIT/LuaJIT.git#commit=f9140a622a0c44a99efb391cc1c2358bc8098ab7")
 sha256sums=('SKIP')
 groups=('ps5-payload-dev')
-
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm' 'ps5-payload-libcxx')
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk

@@ -8,7 +8,7 @@ license=('apache')
 options=(!strip libtool staticlibs)
 source=( "https://github.com/leethomason/tinyxml2/archive/${pkgver}.tar.gz" )
 sha256sums=('3bdf15128ba16686e69bce256cc468e76c7b94ff2c7f391cc5ec09e40bff3839')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
 groups=('ps5-payload-dev')
 
 prepare() {

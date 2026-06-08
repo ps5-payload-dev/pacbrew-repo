@@ -9,7 +9,7 @@ options=(!strip libtool staticlibs)
 source=("https://github.com/libsdl-org/SDL_image/releases/download/release-${pkgver}/SDL2_image-${pkgver}.tar.gz")
 sha256sums=('8f486bbfbcf8464dd58c9e5d93394ab0255ce68b51c5a966a918244820a76ddc')
 groups=('ps5-payload-dev')
-makedepends=('ps5-payload-sdk')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
 depends=('ps5-payload-sdl2'
 	 'ps5-payload-libpng'
 	 'ps5-payload-libjpeg-turbo'
