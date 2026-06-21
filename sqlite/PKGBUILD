@@ -23,7 +23,7 @@ build() {
     cd sqlite-src-3460100
 
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
-		--enable-static --disable-shared
+		--enable-static --disable-shared --disable-tcl
     ${MAKE} sqlite3.h libsqlite3.la
 }
 
