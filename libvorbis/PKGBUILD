@@ -22,8 +22,9 @@ build() {
     cd libvorbis-$pkgver
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -B build \
-             -S .
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -B build \
+        -S .
     ${MAKE} -C build
 }
 
