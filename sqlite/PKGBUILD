@@ -7,7 +7,7 @@ license=('LicenseRef-Sqlite')
 url="https://www.sqlite.org/"
 options=(!strip libtool staticlibs)
 source=(https://www.sqlite.org/2024/sqlite-src-3460100.zip)
-sha256sums=('SKIP')
+sha256sums=('def3fc292eb9ecc444f6c1950e5c79d8462ed5e7b3d605fd6152d145e1d5abb4')
 makedepends=('ps5-payload-sdk')
 
 groups=('ps5-payload-dev')
