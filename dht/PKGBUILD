@@ -26,9 +26,10 @@ build() {
     cd dht-dht-$pkgver
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DCMAKE_INSTALL_INCLUDEDIR=include/dht \
-	     -B build \
-             -S .
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_INSTALL_INCLUDEDIR=include/dht \
+        -B build \
+        -S .
     ${MAKE} -C build
 }
 
