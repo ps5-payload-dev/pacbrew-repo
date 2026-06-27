@@ -1,13 +1,14 @@
 pkgname=ps5-payload-json-c
-pkgver=0.17
+pkgver=0.19
+_date=20260627
 pkgrel=1
 pkgdesc="A JSON implementation in C"
 url="https://github.com/json-c/json-c/wiki"
 license=('MIT')
 arch=('any')
 options=(!strip libtool staticlibs)
-source=("https://github.com/json-c/json-c/archive/refs/tags/json-c-0.17-20230812.tar.gz")
-sha256sums=('024d302a3aadcbf9f78735320a6d5aedf8b77876c8ac8bbb95081ca55054c7eb')
+source=("https://github.com/json-c/json-c/releases/download/json-c-${pkgver}-${_date}/json-c-${pkgver}.tar.gz")
+sha256sums=('37ad0249902e301bd9052bf712e511fcc6acff4ecaad4b5900aad9ce564e26de')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-openlibm')
 depends=('ps5-payload-sdk')
@@ -20,10 +21,9 @@ prepare() {
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd json-c-json-c-0.17-20230812
+    cd json-c-${pkgver}
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DCMAKE_C_FLAGS="-Wno-unreachable-code-generic-assoc" \
         -B build \
         -S .
@@ -33,7 +33,7 @@ build() {
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd json-c-json-c-0.17-20230812
+    cd json-c-${pkgver}
 
     ${MAKE} -C build DESTDIR="${pkgdir}/${PS5_PAYLOAD_SDK}/target" install
 }
