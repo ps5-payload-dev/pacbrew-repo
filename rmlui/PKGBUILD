@@ -24,7 +24,7 @@ build() {
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DRMLUI_LUA_BINDINGS=YES \
-	     -DRML_LUA_BINDINGS_LIBRARY=luajit \
+	     -DRMLUI_LUA_BINDINGS_LIBRARY=luajit \
 	     -B build \
              -S .
     ${MAKE} -C build
