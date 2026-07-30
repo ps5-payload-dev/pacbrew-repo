@@ -1,0 +1,37 @@
+pkgname=ps5-payload-libquickjs
+pkgver=2026.06.04
+pkgrel=1
+pkgdesc='A small and embeddable Javascript engine'
+arch=('any')
+url='https://bellard.org/quickjs/'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=('https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz')
+sha256sums=('b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk' 'ps5-payload-openlibm')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd quickjs-2026-06-04
+
+    ${MAKE} CC="${CC}" AR="${AR}" libquickjs.a
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd quickjs-2026-06-04
+
+    mkdir -p "${pkgdir}/${DESTDIR}${PREFIX}/lib/quickjs"
+    mkdir -p "${pkgdir}/${DESTDIR}${PREFIX}/include/quickjs"
+
+    install -m644 libquickjs.a "${pkgdir}/${DESTDIR}${PREFIX}/lib/quickjs"
+    install -m644 quickjs.h quickjs-libc.h "${pkgdir}/${DESTDIR}${PREFIX}/include/quickjs"
+}
