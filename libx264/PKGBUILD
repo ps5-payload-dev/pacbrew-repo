@@ -1,0 +1,44 @@
+pkgname=ps5-payload-libx264
+pkgver=stable
+pkgrel=1
+pkgdesc='Open Source H264/AVC video encoder'
+arch=('any')
+url='https://www.videolan.org/developers/x264.html'
+license=('GPL-2.0-only')
+source=("git+https://code.videolan.org/videolan/x264.git#branch=stable")
+sha256sums=('SKIP')
+options=(!strip libtool staticlibs)
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+pkgver() {
+    cd x264
+    ./version.sh | grep X264_POINTVER | sed -r 's/^#define X264_POINTVER "([0-9]+\.[0-9]+)\.([0-9]+) (.*)"$/\1.r\2.\3/'
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd x264
+
+    ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
+		--enable-static \
+		--disable-avs --disable-asm
+    ${MAKE}
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd x264
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
