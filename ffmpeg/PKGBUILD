@@ -1,7 +1,7 @@
 pkgname=ps5-payload-ffmpeg
 pkgver=7.0.1
 pkgrel=1
-pkgdesc='ffmpeg port'
+pkgdesc='Complete solution to record, convert and stream audio and video'
 arch=('any')
 url='https://ffmpeg.org'
 license=('LGPL' 'GPL')
