@@ -26,10 +26,10 @@ pkgver() {
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd x264
-
+    export AS=nasm
     ./configure --prefix="${PREFIX}" --host=x86_64-pc-freebsd \
 		--enable-static \
-		--disable-avs --disable-asm
+		--disable-avs
     ${MAKE}
 }
 
