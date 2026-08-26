@@ -7,7 +7,7 @@ PKGS=(sdk openlibm libcxx openmp fast_float fmt
       bzip2 zlib libminizip xz zstd libarchive libdeflate
       openssl libssh
       libevent libiconv libfribidi libpsl
-      libconfig json-c tinyxml2 libxml2 expat jansson
+      libconfig json-c tinyxml2 yaml-cpp libxml2 expat jansson
       miniupnpc
       file libb64 libnatpmp libutp
       sqlite libmicrohttpd libmicrodns

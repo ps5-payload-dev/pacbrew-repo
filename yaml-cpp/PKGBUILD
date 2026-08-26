@@ -1,0 +1,42 @@
+pkgname=ps5-payload-yaml-cpp
+pkgver=0.9.0
+pkgrel=1
+pkgdesc='A YAML parser and emitter in C++'
+arch=('any')
+url='https://github.com/jbeder/yaml-cpp'
+license=('MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-$pkgver.tar.gz")
+sha256sums=('25cb043240f828a8c51beb830569634bc7ac603978e0f69d6b63558dadefd49a')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libcxx')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd yaml-cpp-yaml-cpp-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DYAML_CPP_BUILD_TESTS=OFF \
+	     -DYAML_CPP_BUILD_TOOLS=OFF \
+	     -DYAML_BUILD_SHARED_LIBS=OFF \
+	     -B build \
+             -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd yaml-cpp-yaml-cpp-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
