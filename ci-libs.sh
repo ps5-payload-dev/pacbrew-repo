@@ -18,7 +18,7 @@ PKGS=(sdk openlibm libcxx openmp fast_float fmt
       mpg123 lame libmad faad2 libmodplug libsndfile
       libass
       libvpx libmpeg2 libtheora libx264
-      enet glm
+      enet glm glu glew
       dht
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
       lua luajit libquickjs
