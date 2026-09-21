@@ -21,6 +21,7 @@ PKGS=(sdk openlibm libcxx openmp fast_float fmt
       enet glm glu glew
       dht
       SDL2 SDL2_mixer SDL2_ttf SDL2_image SDL2_net SDL2_gfx
+      physfs
       lua luajit libquickjs
       imgui rmlui curl ffmpeg SDL2_kitchensink
       llvm mesa

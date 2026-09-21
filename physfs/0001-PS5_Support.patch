@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ProsperoPotato <307736720+ProsperoPotato@users.noreply.github.com>
+Date: Tue, 18 Sep 2026 00:00:00 +0000
+Subject: [PATCH] PS5 Support
+
+---
+ CMakeLists.txt             |  4 +++
+ src/physfs_platform_unix.c | 86 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/physfs_platforms.h     |  3 ++
+ 3 files changed, 92 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b3291cc..2383713 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -65,6 +65,10 @@ if(UNIX AND NOT WIN32 AND NOT APPLE)  # (MingW and such might be UNIX _and_ WIND
+     endif()
+ endif()
+ 
++if(PROSPERO)
++    set(OTHER_LDFLAGS ${OTHER_LDFLAGS} SceUserService)
++endif()
++
+ if(PHYSFS_CPP_SRCS)
+     enable_language(CXX)
+ endif()
+diff --git a/src/physfs_platform_unix.c b/src/physfs_platform_unix.c
+index 10d93a7..9945bc1 100644
+--- a/src/physfs_platform_unix.c
++++ b/src/physfs_platform_unix.c
+@@ -57,6 +57,10 @@
+ #include <sys/sysctl.h>
+ #endif
+ 
++#ifdef PHYSFS_PLATFORM_PS5
++int sceUserServiceInitialize(void*);
++int sceUserServiceGetForegroundUser(uint32_t *user_id);
++#endif
+ 
+ #include "physfs_internal.h"
+ 
+@@ -253,7 +257,36 @@ char *__PHYSFS_platformCalcBaseDir(const char *argv0)
+ 
+     /* Try to avoid using argv0 unless forced to. Try system-specific stuff. */
+ 
+-    #if defined(PHYSFS_PLATFORM_FREEBSD)
++    #if defined(PHYSFS_PLATFORM_PS5)
++    {
++        /* https://github.com/ps5-payload-dev/SDL/blob/release-2.30.x-ps5/src/filesystem/ps5/SDL_sysfilesystem.c#L46-L74 */
++        char dirname[PATH_MAX];
++
++        if (!argv0 || !strstr(argv0, "/")) {
++            retval = __PHYSFS_strdup("/data/");
++        } else {
++            if (!getcwd(dirname, sizeof(dirname))) {
++                dirname[0] = '\0';
++            }
++
++            if (argv0[0] != '/') {
++                strcat(dirname, "/");
++                strcat(dirname, argv0);
++            } else {
++                strcpy(dirname, argv0);
++            }
++
++            for (int i = strlen(dirname); i > 0; i--) {
++                if (dirname[i - 1] == '/') {
++                    dirname[i] = '\0';
++                    break;
++                }
++            }
++
++            retval = __PHYSFS_strdup(dirname);
++        }
++    }
++    #elif defined(PHYSFS_PLATFORM_FREEBSD)
+     {
+         char fullpath[PATH_MAX];
+         size_t buflen = sizeof (fullpath);
+@@ -334,6 +367,57 @@ char *__PHYSFS_platformCalcBaseDir(const char *argv0)
+ 
+ char *__PHYSFS_platformCalcPrefDir(const char *org, const char *app)
+ {
++    #if defined(PHYSFS_PLATFORM_PS5)
++    {
++        /* https://github.com/ps5-payload-dev/SDL/blob/release-2.30.x-ps5/src/filesystem/ps5/SDL_sysfilesystem.c#L77-L129 */
++        char envr[PATH_MAX];
++        uint32_t user_id;
++        char *retval = 0;
++        size_t len = 0;
++        char *ptr = 0;
++        int err;
++
++        if (!app) {
++            return NULL;
++        }
++        if (!org) {
++            org = "";
++        }
++
++        err = sceUserServiceInitialize(0);
++        if (err != 0 && err != 0x80960003) {
++            fprintf(stderr, "sceUserServiceInitialize: 0x%08x\n", err);
++        }
++        if (sceUserServiceGetForegroundUser(&user_id)) {
++            strcpy(envr, "/data/");
++        } else {
++            sprintf(envr, "/user/home/%04x/", user_id);
++        }
++        len = strlen(envr);
++
++        len += strlen(org) + strlen(app) + 3;
++        retval = (char *) allocator.Malloc(len);
++        BAIL_IF(!retval, PHYSFS_ERR_OUT_OF_MEMORY, NULL);
++
++        if (*org) {
++            snprintf(retval, len, "%s%s/%s/", envr, org, app);
++        } else {
++            snprintf(retval, len, "%s%s/", envr, app);
++        }
++
++        for (ptr = retval + 1; *ptr; ptr++) {
++            if (*ptr == '/') {
++                *ptr = '\0';
++                mkdir(retval, 0777);
++                *ptr = '/';
++            }
++        }
++
++        mkdir(retval, 0777);
++
++        return retval;
++    }
++    #endif
+     /*
+      * We use XDG's base directory spec, even if you're not on Linux.
+      *  This isn't strictly correct, but the results are relatively sane
+diff --git a/src/physfs_platforms.h b/src/physfs_platforms.h
+index 1ac17d9..c6be493 100644
+--- a/src/physfs_platforms.h
++++ b/src/physfs_platforms.h
+@@ -54,6 +54,9 @@
+ #  define PHYSFS_PLATFORM_UNIX 1
+ #  define PHYSFS_PLATFORM_POSIX 1
+ #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
++#  if defined(__PROSPERO__)
++#    define PHYSFS_PLATFORM_PS5 1
++#  endif
+ #  define PHYSFS_PLATFORM_FREEBSD 1
+ #  define PHYSFS_PLATFORM_BSD 1
+ #  define PHYSFS_PLATFORM_UNIX 1
+-- 
+2.55.0
+
