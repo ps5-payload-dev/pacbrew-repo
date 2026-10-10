@@ -29,6 +29,8 @@ build() {
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
 	     -DSDL_OPENGL=YES \
+	     -DSDL_OPENGLES=YES \
+	     -DSDL_VULKAN=YES \
 	     -DSDL_LOADSO=YES \
 	     -B build \
              -S .
