@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:23:09 +0000
+Subject: [PATCH] c11: Mesa's threads under names of their own on the PS5
+
+The PS5 SDK's libc.a has FreeBSD's C11 threads, whose thrd_success is 4
+where Mesa's code assumes 0. With C11_THREADS_RENAME, Mesa's own
+implementation takes symbol names of its own (mesa_thrd_create, ...), so that
+a link cannot resolve Mesa's calls to the libc's functions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ meson.build       |  7 ++++++
+ src/c11/threads.h | 58 +++++++++++++++++++++++++++--------------------
+ 2 files changed, 40 insertions(+), 25 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index eaa2e955a86..76638305233 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1716,6 +1716,13 @@ if cc.has_function('thrd_create', prefix: '#include <threads.h>')
+   endif
+ endif
+ 
++# The PS5 SDK's libc.a carries FreeBSD's C11 threads, whose thrd_success is 4,
++# not the 0 Mesa's code assumes. Mesa keeps its own, under symbol names of their
++# own, so that a link never takes the libc's in their place.
++if with_radv_ps5_console
++  pre_args += '-DC11_THREADS_RENAME'
++endif
++
+ if cc.has_header_symbol('errno.h', 'program_invocation_name',
+                         args : '-D_GNU_SOURCE')
+    pre_args += '-DHAVE_PROGRAM_INVOCATION_NAME'
+diff --git a/src/c11/threads.h b/src/c11/threads.h
+index c849f385e30..4e371203b37 100644
+--- a/src/c11/threads.h
++++ b/src/c11/threads.h
+@@ -150,38 +150,46 @@ enum
+ 
+ /*-------------------------- functions --------------------------*/
+ 
+-void call_once(once_flag *, void (*)(void));
+-int cnd_broadcast(cnd_t *);
+-void cnd_destroy(cnd_t *);
+-int cnd_init(cnd_t *);
+-int cnd_signal(cnd_t *);
++/* Where libc has C11 threads of its own that a static link could take in
++ * place of these (C11_THREADS_RENAME), these are given other symbol names. */
++#ifdef C11_THREADS_RENAME
++#  define C11_THREADS_SYMBOL(name) __asm__("mesa_" #name)
++#else
++#  define C11_THREADS_SYMBOL(name)
++#endif
++
++void call_once(once_flag *, void (*)(void)) C11_THREADS_SYMBOL(call_once);
++int cnd_broadcast(cnd_t *) C11_THREADS_SYMBOL(cnd_broadcast);
++void cnd_destroy(cnd_t *) C11_THREADS_SYMBOL(cnd_destroy);
++int cnd_init(cnd_t *) C11_THREADS_SYMBOL(cnd_init);
++int cnd_signal(cnd_t *) C11_THREADS_SYMBOL(cnd_signal);
+ int cnd_timedwait(cnd_t *__restrict, mtx_t *__restrict __mtx,
+-                  const struct timespec *__restrict);
+-int cnd_wait(cnd_t *, mtx_t *__mtx);
+-void mtx_destroy(mtx_t *__mtx);
+-int mtx_init(mtx_t *__mtx, int);
+-int mtx_lock(mtx_t *__mtx);
++                  const struct timespec *__restrict) C11_THREADS_SYMBOL(cnd_timedwait);
++int cnd_wait(cnd_t *, mtx_t *__mtx) C11_THREADS_SYMBOL(cnd_wait);
++void mtx_destroy(mtx_t *__mtx) C11_THREADS_SYMBOL(mtx_destroy);
++int mtx_init(mtx_t *__mtx, int) C11_THREADS_SYMBOL(mtx_init);
++int mtx_lock(mtx_t *__mtx) C11_THREADS_SYMBOL(mtx_lock);
+ int mtx_timedlock(mtx_t *__restrict __mtx,
+-                  const struct timespec *__restrict);
+-int mtx_trylock(mtx_t *__mtx);
+-int mtx_unlock(mtx_t *__mtx);
+-int thrd_create(thrd_t *, thrd_start_t, void *);
+-thrd_t thrd_current(void);
+-int thrd_detach(thrd_t);
+-int thrd_equal(thrd_t, thrd_t);
++                  const struct timespec *__restrict) C11_THREADS_SYMBOL(mtx_timedlock);
++int mtx_trylock(mtx_t *__mtx) C11_THREADS_SYMBOL(mtx_trylock);
++int mtx_unlock(mtx_t *__mtx) C11_THREADS_SYMBOL(mtx_unlock);
++int thrd_create(thrd_t *, thrd_start_t, void *) C11_THREADS_SYMBOL(thrd_create);
++thrd_t thrd_current(void) C11_THREADS_SYMBOL(thrd_current);
++int thrd_detach(thrd_t) C11_THREADS_SYMBOL(thrd_detach);
++int thrd_equal(thrd_t, thrd_t) C11_THREADS_SYMBOL(thrd_equal);
+ #if defined(__cplusplus)
+ [[ noreturn ]]
+ #else
+ _Noreturn
+ #endif
+-void thrd_exit(int);
+-int thrd_join(thrd_t, int *);
+-int thrd_sleep(const struct timespec *, struct timespec *);
+-void thrd_yield(void);
+-int tss_create(tss_t *, tss_dtor_t);
+-void tss_delete(tss_t);
+-void *tss_get(tss_t);
+-int tss_set(tss_t, void *);
++void thrd_exit(int) C11_THREADS_SYMBOL(thrd_exit);
++int thrd_join(thrd_t, int *) C11_THREADS_SYMBOL(thrd_join);
++int thrd_sleep(const struct timespec *, struct timespec *) C11_THREADS_SYMBOL(thrd_sleep);
++void thrd_yield(void) C11_THREADS_SYMBOL(thrd_yield);
++int tss_create(tss_t *, tss_dtor_t) C11_THREADS_SYMBOL(tss_create);
++void tss_delete(tss_t) C11_THREADS_SYMBOL(tss_delete);
++void *tss_get(tss_t) C11_THREADS_SYMBOL(tss_get);
++int tss_set(tss_t, void *) C11_THREADS_SYMBOL(tss_set);
+ 
+ #ifdef __cplusplus
+ }

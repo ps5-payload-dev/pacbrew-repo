@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:39 +0000
+Subject: [PATCH] radv/ps5: a compute and transfer queue family on the graphics
+ ring
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  08965df7c36 Merge ps5-queues: a compute and transfer queue family on the graphics ring
+---
+ src/amd/common/ac_gpu_info.h                |  4 ++++
+ src/amd/vulkan/radv_formats.c               |  2 +-
+ src/amd/vulkan/radv_physical_device.c       | 22 +++++++++++++++++++--
+ src/amd/vulkan/radv_physical_device.h       |  9 +++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c |  6 ++++++
+ 5 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/src/amd/common/ac_gpu_info.h b/src/amd/common/ac_gpu_info.h
+index 7aba81a3532..d5f48b1f913 100644
+--- a/src/amd/common/ac_gpu_info.h
++++ b/src/amd/common/ac_gpu_info.h
+@@ -421,6 +421,10 @@ struct radeon_info {
+    bool has_sparse_cpu_binds;
+    /* How much address space sparse resources can take in all. */
+    uint64_t max_sparse_va_bytes;
++   /* Queues of a compute and transfer family whose submissions go to the
++    * graphics ring, without concurrency, where there is no compute ring to
++    * use (the PS5 winsys). 0 without such a family. */
++   uint8_t num_compute_queues_on_gfx;
+    /* 3D sparse images */
+    bool has_sparse_image_3d;
+    /* 3D sparse images with standard block shape */
+diff --git a/src/amd/vulkan/radv_formats.c b/src/amd/vulkan/radv_formats.c
+index 976ee29868e..df7cf9a7e16 100644
+--- a/src/amd/vulkan/radv_formats.c
++++ b/src/amd/vulkan/radv_formats.c
+@@ -409,7 +409,7 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
+          if (vk_format_has_depth(format) && vk_format_has_stencil(format))
+             tiled &= ~VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+ 
+-         if (radv_compute_queue_enabled(pdev)) {
++         if (radv_compute_queue_enabled(pdev) || radv_compute_on_gfx_queue_enabled(pdev)) {
+             tiled |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                      VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR;
+          }
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 18d2b055a6b..03093180446 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -416,6 +416,9 @@ radv_physical_device_init_queue_table(struct radv_physical_device *pdev)
+    if (radv_compute_queue_enabled(pdev)) {
+       pdev->vk_queue_to_radv[idx] = RADV_QUEUE_COMPUTE;
+       idx++;
++   } else if (radv_compute_on_gfx_queue_enabled(pdev)) {
++      pdev->vk_queue_to_radv[idx] = RADV_QUEUE_GENERAL;
++      idx++;
+    }
+ 
+    if (radv_video_decode_queue_enabled(pdev)) {
+@@ -1820,7 +1823,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+    VkQueueFlags copy_memory_indirect_queues = 0;
+    if (radv_graphics_queue_enabled(pdev))
+       copy_memory_indirect_queues |= VK_QUEUE_GRAPHICS_BIT;
+-   if (radv_compute_queue_enabled(pdev))
++   if (radv_compute_queue_enabled(pdev) || radv_compute_on_gfx_queue_enabled(pdev))
+       copy_memory_indirect_queues |= VK_QUEUE_COMPUTE_BIT;
+ 
+    pdev->vk.properties = (struct vk_properties){
+@@ -3006,7 +3009,7 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
+    if (radv_graphics_queue_enabled(pdev))
+       num_queue_families++;
+ 
+-   if (radv_compute_queue_enabled(pdev))
++   if (radv_compute_queue_enabled(pdev) || radv_compute_on_gfx_queue_enabled(pdev))
+       num_queue_families++;
+ 
+    if (radv_video_decode_queue_enabled(pdev))
+@@ -3061,6 +3064,21 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
+       }
+    }
+ 
++   if (radv_compute_on_gfx_queue_enabled(pdev)) {
++      /* Queues on the graphics ring that offer no graphics. */
++      VkQueueFlags compute_flags =
++         VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | (pdev->info.has_sparse ? VK_QUEUE_SPARSE_BINDING_BIT : 0);
++      if (*pCount > idx) {
++         *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
++            .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_GENERAL),
++            .queueCount = pdev->info.num_compute_queues_on_gfx,
++            .timestampValidBits = 64,
++            .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
++         };
++         idx++;
++      }
++   }
++
+    if (radv_video_decode_queue_enabled(pdev)) {
+       if (*pCount > idx) {
+          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
+diff --git a/src/amd/vulkan/radv_physical_device.h b/src/amd/vulkan/radv_physical_device.h
+index dfbc14e4a5a..6d1be8616bb 100644
+--- a/src/amd/vulkan/radv_physical_device.h
++++ b/src/amd/vulkan/radv_physical_device.h
+@@ -222,6 +222,15 @@ radv_physical_device_instance(const struct radv_physical_device *pdev)
+    return (struct radv_instance *)pdev->vk.instance;
+ }
+ 
++/* A compute and transfer family whose queues run on the graphics ring
++ * (radeon_info.num_compute_queues_on_gfx): RADV_QUEUE_GENERAL queues that
++ * offer no graphics. */
++static inline bool
++radv_compute_on_gfx_queue_enabled(const struct radv_physical_device *pdev)
++{
++   return pdev->info.num_compute_queues_on_gfx > 0 && pdev->info.ip[AMD_IP_COMPUTE].num_queues == 0;
++}
++
+ static inline bool
+ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
+ {
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 7238bcc54d5..7c6b4e4e9e9 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -343,6 +343,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * to report itself non-resident; and a bind is a mapping change made at
+     * once, after the submission's waits. */
+    info->has_sparse = true;
++   /* A compute and transfer queue family, as upstream offers on this family
++    * of GPUs, whose queues submit to the graphics ring through the same
++    * sceAgcDriverSubmitDcb: their work runs in turn with graphics rather than
++    * alongside it, which Vulkan allows. AGC's asynchronous compute queues
++    * would run it alongside; they are not used yet. */
++   info->num_compute_queues_on_gfx = 4;
+    info->has_sparse_prt = false;
+    info->has_sparse_cpu_binds = true;
+    info->max_sparse_va_bytes = radv_ps5_vrange_space_bytes();

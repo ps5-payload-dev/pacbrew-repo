@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Fri, 9 Oct 2026 20:25:36 +0000
+Subject: [PATCH] radv/ps5: the shader cache in /data where there is no title
+ folder
+
+A payload runs in a process whose /app0, if it has one, is not its own to
+write to. The shader cache goes to /data/radv-shader-cache there, and stays
+in /app0/radv-shader-cache for a title. MESA_SHADER_CACHE_DIR still decides
+first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 46ffd1052dc..f0485c10af3 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -23,6 +23,7 @@
+ 
+ #if defined(__PROSPERO__)
+ #include "ps5_sce.h"
++#include <unistd.h>
+ #else
+ #include <sys/mman.h>
+ #endif
+@@ -263,8 +264,10 @@ radv_ps5_platform_once(void)
+ {
+    /* RADV's shader cache in the title's own folder, as ps5vk kept its compiled
+     * shaders there (ps5vk-shader-cache), in the database form, which needs no
+-    * file mapping. A title may choose otherwise, as on Linux. */
+-   setenv("MESA_SHADER_CACHE_DIR", "/app0/radv-shader-cache", 0);
++    * file mapping. A process without a folder of its own to write to (a
++    * payload) keeps it in /data. A title may choose otherwise, as on Linux. */
++   setenv("MESA_SHADER_CACHE_DIR",
++          access("/app0", W_OK) == 0 ? "/app0/radv-shader-cache" : "/data/radv-shader-cache", 0);
+    setenv("MESA_DISK_CACHE_DATABASE", "1", 0);
+ 
+    radv_ps5_agc_result = sceAgcInit(PS5_AGC_INIT_VERSION);

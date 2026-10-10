@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:21:44 +0000
+Subject: [PATCH] radv/ps5: declare the console's functions in
+ include/ps5_sce.h
+
+The winsys and the VideoOut WSI call a handful of kernel, AGC and VideoOut
+functions. Declare them in include/ps5_sce.h instead of including the
+payload SDK's <ps5platform/*.h>, so that Mesa builds with any PS5 toolchain
+that links the system modules' stubs (-lSceAgc -lSceAgcDriver
+-lSceVideoOut).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ include/ps5_sce.h                             | 133 ++++++++++++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c |   3 +-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |   2 +-
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   |   2 +-
+ src/vulkan/wsi/wsi_common_videoout.c          |   5 +-
+ 5 files changed, 138 insertions(+), 7 deletions(-)
+ create mode 100644 include/ps5_sce.h
+
+diff --git a/include/ps5_sce.h b/include/ps5_sce.h
+new file mode 100644
+index 00000000000..1e46c355f9b
+--- /dev/null
++++ b/include/ps5_sce.h
+@@ -0,0 +1,133 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Declarations of the PlayStation 5 system functions RADV's PS5 winsys
++ * (src/amd/vulkan/winsys/ps5) and the VideoOut WSI
++ * (src/vulkan/wsi/wsi_common_videoout.c) call. The payload SDK links them
++ * (libkernel, libSceVideoOut, libSceAgc and libSceAgcDriver stubs) but its
++ * headers do not declare them, so Mesa carries its own.
++ *
++ * Kernel signatures follow the public PS4 SDK's, which the PS5 keeps. AGC and
++ * VideoOut signatures are the forms the console accepted in PS5_Vulkan's runs.
++ * Only built for the console (__PROSPERO__).
++ */
++
++#ifndef PS5_SCE_H
++#define PS5_SCE_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ------------------------------------------------------------- libkernel */
++
++#define PS5_KERNEL_PROT_CPU_READ  0x01
++#define PS5_KERNEL_PROT_CPU_WRITE 0x02
++#define PS5_KERNEL_PROT_CPU_EXEC  0x04
++#define PS5_KERNEL_PROT_GPU_READ  0x10
++#define PS5_KERNEL_PROT_GPU_WRITE 0x20
++
++/* MAP_FIXED. */
++#define PS5_KERNEL_MAP_FIXED 0x10
++
++/* Direct memory for CPU-only use (write-back). */
++#define PS5_KERNEL_DIRECT_TYPE_CPU 12
++
++/* Mappings are made in 16 KiB pages; direct memory in 64 KiB units. */
++#define PS5_KERNEL_PAGE_SIZE        ((size_t)0x4000)
++#define PS5_KERNEL_DIRECT_ALIGNMENT ((size_t)0x10000)
++
++int32_t sceKernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size_t length,
++                                      size_t alignment, int memory_type, int64_t *physical_start);
++int32_t sceKernelReleaseDirectMemory(int64_t start, size_t length);
++int32_t sceKernelMapDirectMemory(void **address, size_t length, int protection, int flags,
++                                 int64_t direct_start, size_t alignment);
++int64_t sceKernelGetDirectMemorySize(void);
++int32_t sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t search_end, size_t alignment,
++                                           int64_t *physical_start, size_t *available);
++int32_t sceKernelMprotect(const void *address, size_t length, int protection);
++int32_t sceKernelReserveVirtualRange(void **address, size_t length, int flags, size_t alignment);
++int32_t sceKernelMunmap(void *address, size_t length);
++
++/* --------------------------------------------- libSceAgc, libSceAgcDriver */
++
++#define PS5_AGC_INIT_VERSION 8u
++
++/* PM4 words in GPU-visible direct memory, written back from the CPU caches
++ * before submission. The flag byte stays 0. */
++struct ps5_agc_submit_description {
++   void *words;
++   uint32_t word_count;
++   uint8_t flag;
++   uint8_t padding[3];
++};
++
++int32_t sceAgcInit(uint32_t version);
++int32_t sceAgcSuspendPoint(void);
++int32_t sceAgcDriverSubmitDcb(struct ps5_agc_submit_description *description);
++/* AGC programs the tessellation factor ring and VGT_HS_OFFCHIP_PARAM itself. */
++int32_t sceAgcDriverSetTFRing(uintptr_t address, uint32_t size);
++int32_t sceAgcDriverSetHsOffchipParam(uint32_t granularity, uint32_t buffering);
++
++/* -------------------------------------------------------- libSceVideoOut */
++
++#define PS5_VIDEO_OUT_USER_SYSTEM 0xff
++
++/* 8-bit SDR, bytes B, G, R, A. */
++#define PS5_VIDEO_OUT_PIXEL_FORMAT_B8G8R8A8_SDR UINT64_C(0x8000000000000000)
++
++/* 64 KiB SW_64KB_R_X tiles. */
++#define PS5_VIDEO_OUT_TILING_64KB_R_X 0u
++
++/* Size of the opaque attribute sceVideoOutSetBufferAttribute2 fills. */
++#define PS5_VIDEO_OUT_ATTRIBUTE_BYTES 80
++
++struct ps5_video_out_buffer {
++   void *data;
++   void *metadata;
++   void *reserved[2];
++};
++
++/* sceVideoOutGetFlipStatus writes this many 64-bit words; this one is the
++ * argument of the latest flip shown. */
++#define PS5_VIDEO_OUT_FLIP_STATUS_WORDS          16
++#define PS5_VIDEO_OUT_FLIP_STATUS_SHOWN_ARGUMENT 3
++
++/* Flip at the next vblank. */
++#define PS5_VIDEO_OUT_FLIP_VSYNC 1
++
++/* Output modes: 119.88 Hz (needs the title's high-frame-rate declaration),
++ * and back. */
++#define PS5_VIDEO_OUT_MODE_HIGH_FRAME_RATE 15u
++#define PS5_VIDEO_OUT_MODE_RESTORE         1u
++
++int sceVideoOutOpen(int32_t user, int32_t bus, int32_t index, const void *parameter);
++int sceVideoOutClose(int32_t handle);
++int sceVideoOutSetFlipRate(int32_t handle, int32_t rate);
++void sceVideoOutSetBufferAttribute2(void *attribute, uint64_t pixel_format, uint32_t tiling,
++                                    uint32_t width, uint32_t height, uint64_t reserved1,
++                                    uint32_t reserved2, uint64_t reserved3);
++int sceVideoOutRegisterBuffers2(int32_t handle, int32_t set, int32_t start,
++                                struct ps5_video_out_buffer *buffers, int32_t count,
++                                void *attribute, int32_t reserved, void *option);
++int sceVideoOutUnregisterBuffers(int32_t handle, int32_t set);
++int sceVideoOutSubmitFlip(int32_t handle, int32_t buffer_index, uint32_t mode, int64_t argument);
++int sceVideoOutGetFlipStatus(int32_t handle, uint64_t status[PS5_VIDEO_OUT_FLIP_STATUS_WORDS]);
++int sceVideoOutIsFlipPending(int32_t handle);
++int sceVideoOutWaitVblank(int32_t handle);
++int sceVideoOutIsOutputSupported(int32_t handle, uint32_t mode, const void *reserved1,
++                                 const void *reserved2, const void *reserved3);
++int sceVideoOutConfigureOutput(int32_t handle, uint32_t mode, const void *reserved1,
++                               const void *reserved2, const void *reserved3);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS5_SCE_H */
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 98783e37036..5bbb6074400 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -22,8 +22,7 @@
+ #include "util/u_math.h"
+ 
+ #if defined(__PROSPERO__)
+-#include <ps5platform/agc.h>
+-#include <ps5platform/kernel.h>
++#include "ps5_sce.h"
+ #else
+ #include <sys/mman.h>
+ #endif
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 68bdeb35a7c..ddaa94a495a 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -14,7 +14,7 @@
+ /* What the PS5 winsys needs from the console: direct memory the CPU and the GPU
+  * share at one address, submission of PM4 words, and the CPU cache control the
+  * GPU's view of that memory requires. On the console these are the exported
+- * kernel and AGC functions (ps5platform/kernel.h, ps5platform/agc.h); a host
++ * kernel and AGC functions (include/ps5_sce.h); a host
+  * build models them, so the driver runs on a PC for everything that does not
+  * need the GPU to execute (device creation, pipeline compilation, API tests).
+  */
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 6319a3398d8..55b228393d7 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -328,7 +328,7 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    /* VideoOut scans out 64 KiB R_X tiles (tiling 0) with no pipe or bank
+     * swizzle: ps5vk renders its framebuffers in that mode, and the demo
+     * renderer's CPU-written tiles showed (PS5_Vulkan src/demo_renderer.cpp,
+-    * ps5platform/videoout.h). */
++    * include/ps5_sce.h). */
+    info->has_fixed_display_swizzle = true;
+    info->display_swizzle_mode = ADDR_SW_64KB_R_X;
+    /* Every indirect mesh draw stopped the CP with a bad opcode at
+diff --git a/src/vulkan/wsi/wsi_common_videoout.c b/src/vulkan/wsi/wsi_common_videoout.c
+index 9e2ba819943..a26694847c0 100644
+--- a/src/vulkan/wsi/wsi_common_videoout.c
++++ b/src/vulkan/wsi/wsi_common_videoout.c
+@@ -13,7 +13,7 @@
+  * and the display refreshes at it (measured, as PS5_Vulkan's ps5vk measured
+  * both). VideoOut's framebuffers are the process's: five 32 MiB buffers of
+  * direct memory registered once, in the 64 KiB R_X tiles VideoOut scans out
+- * (ps5platform/videoout.h). A swapchain takes the first of them as its
++ * (include/ps5_sce.h). A swapchain takes the first of them as its
+  * images, imported into its device as host memory
+  * (VK_EXT_external_memory_host) and laid out as the display takes them (the
+  * device's display swizzle, radeon_info), so a device made again, as
+@@ -46,8 +46,7 @@
+ 
+ #if defined(__PROSPERO__)
+ #include <immintrin.h>
+-#include <ps5platform/kernel.h>
+-#include <ps5platform/videoout.h>
++#include "ps5_sce.h"
+ #else
+ #include <sys/mman.h>
+ #endif

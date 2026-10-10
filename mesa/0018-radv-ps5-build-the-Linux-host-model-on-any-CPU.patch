@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:21:53 +0000
+Subject: [PATCH] radv/ps5: build the Linux host model on any CPU
+
+The host model of the PS5 winsys (-Dradv-winsys=ps5 on Linux) runs on the
+build machine for everything that does not need the GPU. Spin waits and the
+CPU cache flush used x86 instructions unconditionally; use them where the
+CPU has them, a pause hint or a fence elsewhere. On Linux, take __u64 from
+<linux/types.h> instead of defining it again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ src/amd/common/ac_drm_fourcc.h                |  4 +++-
+ src/amd/vulkan/layers/radv_threaded_layer.c   | 13 ++++++++++++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c |  6 ++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   | 13 ++++++++++++-
+ 4 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/src/amd/common/ac_drm_fourcc.h b/src/amd/common/ac_drm_fourcc.h
+index 00294ac29e3..7367885f7d0 100644
+--- a/src/amd/common/ac_drm_fourcc.h
++++ b/src/amd/common/ac_drm_fourcc.h
+@@ -10,7 +10,9 @@
+ #if defined(_WIN32) || defined(AMD_NO_DRM)
+ #include <stdint.h>
+ /* Linux headers define __u64; elsewhere it is this. */
+-#if defined(_WIN32) || !defined(__linux__)
++#if defined(__linux__)
++#include <linux/types.h>
++#else
+ typedef uint64_t __u64;
+ #endif
+ #define DRM_FORMAT_MOD_VENDOR_NONE    0
+diff --git a/src/amd/vulkan/layers/radv_threaded_layer.c b/src/amd/vulkan/layers/radv_threaded_layer.c
+index 7a7e3a2082d..d0a48587598 100644
+--- a/src/amd/vulkan/layers/radv_threaded_layer.c
++++ b/src/amd/vulkan/layers/radv_threaded_layer.c
+@@ -61,6 +61,17 @@ struct radv_threaded_recorder {
+    thrd_t thread;
+ };
+ 
++/* A spin-wait hint, where the CPU has one. */
++static inline void
++radv_threaded_cpu_pause(void)
++{
++#if defined(__x86_64__) || defined(__i386__)
++   __builtin_ia32_pause();
++#elif defined(__aarch64__)
++   __asm__ volatile("yield");
++#endif
++}
++
+ static thread_local bool radv_threaded_on_worker;
+ 
+ bool
+@@ -101,7 +112,7 @@ radv_threaded_worker(void *opaque)
+          mtx_unlock(&rec->lock);
+          const uint64_t until = radv_threaded_now_ns() + RADV_THREADED_SPIN_NS;
+          while (!p_atomic_read(&rec->queued) && radv_threaded_now_ns() < until)
+-            __builtin_ia32_pause();
++            radv_threaded_cpu_pause();
+          mtx_lock(&rec->lock);
+ 
+          if (list_is_empty(&rec->batches) && !rec->stop) {
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 5bbb6074400..f9bcc4b45e8 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -176,6 +176,11 @@ radv_ps5_cpu_flush(const void *address, size_t bytes)
+ {
+    if (bytes == 0)
+       return;
++#if !defined(__x86_64__)
++   /* A host model on another CPU: no GPU reads this memory, so ordering is
++    * all a flush has to give. */
++   __atomic_thread_fence(__ATOMIC_SEQ_CST);
++#else
+    const uintptr_t line = 64;
+    uintptr_t at = (uintptr_t)address & ~(line - 1);
+    const uintptr_t end = (uintptr_t)address + bytes;
+@@ -187,6 +192,7 @@ radv_ps5_cpu_flush(const void *address, size_t bytes)
+    for (; at < end; at += line)
+       __asm__ volatile("clflushopt %0" : "+m"(*(volatile char *)at));
+    __builtin_ia32_mfence();
++#endif
+ }
+ 
+ static bool
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 55b228393d7..e31c3d64206 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -20,6 +20,17 @@
+ #include "ac_linux_drm.h"
+ #include "sid.h"
+ 
++/* A spin-wait hint, where the CPU has one. */
++static inline void
++radv_ps5_cpu_pause(void)
++{
++#if defined(__x86_64__) || defined(__i386__)
++   __builtin_ia32_pause();
++#elif defined(__aarch64__)
++   __asm__ volatile("yield");
++#endif
++}
++
+ /* ------------------------------------------------------------------ queue */
+ 
+ static struct radv_ps5_queue radv_ps5_queue_storage;
+@@ -114,7 +125,7 @@ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs
+          return false;
+       }
+       if (now < spin_until)
+-         __builtin_ia32_pause();
++         radv_ps5_cpu_pause();
+       else
+          radv_ps5_sleep_us(1000);
+    }

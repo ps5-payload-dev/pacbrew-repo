@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:39 +0000
+Subject: [PATCH] radv/ps5: an integrated GPU's memory types and host pointers
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  6c28a5e891b Merge ps5-memtypes: an integrated GPU's memory, host-cached types and host pointers
+---
+ src/amd/vulkan/radv_physical_device.c         |  2 +-
+ src/amd/vulkan/winsys/ps5/radv_ps5_bo.c       | 32 ++++++++++++++++---
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 19 +++++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |  5 +++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   | 13 +++++---
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h   |  3 ++
+ 6 files changed, 65 insertions(+), 9 deletions(-)
+
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 03093180446..886a4c180d9 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -2110,7 +2110,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .maxDiscardRectangles = MAX_DISCARD_RECTANGLES,
+ 
+       /* VK_EXT_external_memory_host */
+-      .minImportedHostPointerAlignment = 4096,
++      .minImportedHostPointerAlignment = MAX2(4096, pdev->info.gart_page_size),
+ 
+       /* VK_AMD_shader_core_properties */
+       /* Shader engines. */
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c b/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
+index ca7292e8840..084c8bbc90a 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
+@@ -114,6 +114,11 @@ radv_ps5_buffer_destroy(struct radeon_winsys *rws, struct radeon_winsys_bo *base
+       free(bo);
+       return;
+    }
++   /* The application's memory stays its own. */
++   if (bo->imported) {
++      free(bo);
++      return;
++   }
+    p_atomic_add(&radv_ps5_allocated_bytes, -(int64_t)bo->memory.bytes);
+    if (bo->base.initial_domain & RADEON_DOMAIN_VRAM)
+       p_atomic_add(&ws->allocated_vram, -(int64_t)bo->memory.bytes);
+@@ -160,12 +165,31 @@ static VkResult
+ radv_ps5_buffer_from_ptr(struct radeon_winsys *rws, void *pointer, uint64_t size, unsigned priority,
+                          struct radeon_winsys_bo **out_bo)
+ {
+-   (void)rws;
+-   (void)pointer;
+-   (void)size;
+    (void)priority;
++   struct radv_ps5_winsys *const ws = radv_ps5_winsys(rws);
+    *out_bo = NULL;
+-   return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   /* Host memory the application owns, at the address the CPU uses, once it
++    * has GPU access. */
++   const uint64_t va = (uint64_t)(uintptr_t)pointer;
++   if (!size || va % RADV_PS5_PAGE_BYTES || size % RADV_PS5_PAGE_BYTES || va >= RADV_PS5_GPU_ADDRESS_LIMIT ||
++       size > RADV_PS5_GPU_ADDRESS_LIMIT - va || !radv_ps5_memory_grant_gpu(pointer, size))
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
++   if (!bo)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   bo->ws = ws;
++   bo->imported = true;
++   bo->memory = (struct radv_ps5_memory){.cpu = pointer, .bytes = size, .physical = -1};
++   bo->base.va = va;
++   bo->base.size = size;
++   bo->base.is_local = false;
++   bo->base.use_global_list = true;
++   bo->base.initial_domain = RADEON_DOMAIN_GTT;
++   bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
++   *out_bo = &bo->base;
++   return VK_SUCCESS;
+ }
+ 
+ static VkResult
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 42240761d5e..5dfab18c3bb 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -586,6 +586,16 @@ radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
+    return result == 0;
+ }
+ 
++bool
++radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
++{
++   /* A title's anonymous memory takes GPU access this way, and a shader then
++    * writes it through the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */
++   return sceKernelMprotect(address, bytes,
++                            PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE | PS5_KERNEL_PROT_GPU_READ |
++                               PS5_KERNEL_PROT_GPU_WRITE) == 0;
++}
++
+ void
+ radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
+ {
+@@ -729,6 +739,15 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
+    return true;
+ }
+ 
++bool
++radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
++{
++   /* The model runs no GPU work: the memory stays the application's. */
++   (void)address;
++   (void)bytes;
++   return true;
++}
++
+ /* Sparse ranges in the model: plain memory, which binds leave alone (the
+  * model runs no GPU work to read through them). */
+ bool
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 42379832d6e..8884ca013a1 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -66,6 +66,11 @@ void radv_ps5_memory_free(struct radv_ps5_memory *memory);
+ bool radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
+                                       struct radv_ps5_memory *out);
+ 
++/* Host memory the application allocated, given GPU read and write access
++ * where the CPU keeps its own: the GPU then reaches it at the CPU's address
++ * (VK_EXT_external_memory_host). Whole pages. */
++bool radv_ps5_memory_grant_gpu(void *address, uint64_t bytes);
++
+ /* Sparse resources: a range reserved in the device-memory region, or in the
+  * window for one the shaders reach through a 32-bit pointer (a descriptor
+  * buffer), unbound (the shared zero block) until pieces of a buffer's memory
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 7c6b4e4e9e9..ffa7bbb7202 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -329,7 +329,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * lock VK_KHR_performance_query takes always failed
+     * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
+    info->has_perf_counters = false;
+-   info->has_dedicated_vram = true;
++   /* One pool of memory the CPU and the GPU share, which RADV presents as an
++    * integrated GPU's: a device-local heap and a host heap over it, with
++    * host-cached types. The CPU's mapping of that memory is cached and the GPU
++    * reads and writes it coherently with the CPU's caches (the RADV smoke
++    * title's coherence probe). */
++   info->has_dedicated_vram = false;
+    info->all_vram_visible = true;
+    info->address32_hi = RADV_PS5_ADDRESS32_HI;
+    /* Timeline semaphores: the runtime builds them over the binary sync type
+@@ -362,9 +367,9 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    info->has_replayable_va = true;
+    info->has_replayable_va_32bit = false;
+    info->has_vm_always_valid = true;
+-   /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
+-    * made visible to the GPU is a probe still to run. */
+-   info->has_userptr = false;
++   /* buffer_from_ptr gives the application's host memory GPU access, which the
++    * GPU reaches at the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */
++   info->has_userptr = true;
+    info->max_submitted_ibs[AMD_IP_GFX] = 1;
+ 
+    /* ac_query_gpu_info's own derivations, which have no kernel input. */
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+index 5f198a8858f..fa7ecd2be1f 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+@@ -103,6 +103,9 @@ struct radv_ps5_bo {
+    /* A sparse resource's range (RADEON_FLAG_VIRTUAL): memory is the reserved
+     * range, and buffers are bound into it. */
+    bool sparse;
++   /* Host memory the application owns (buffer_from_ptr), which the buffer
++    * does not free. */
++   bool imported;
+ };
+ 
+ static inline struct radv_ps5_bo *

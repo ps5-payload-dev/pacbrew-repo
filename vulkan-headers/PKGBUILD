@@ -1,0 +1,37 @@
+pkgname=ps5-payload-vulkan-headers
+pkgver=1.4.354
+pkgrel=1
+pkgdesc='Vulkan header files and API registry'
+arch=('any')
+url='https://github.com/KhronosGroup/Vulkan-Headers'
+license=('Apache-2.0 OR MIT')
+options=(!strip libtool staticlibs)
+source=("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('4ca3606e57728febf8aef097c9d7ba6c52385955bb4a6dc06fcf9fc3d76541de')
+groups=('ps5-payload-dev' 'ps5-payload-gl')
+makedepends=('ps5-payload-sdk')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd Vulkan-Headers-$pkgver
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+	     -DVULKAN_HEADERS_ENABLE_MODULE=OFF \
+	     -DVULKAN_HEADERS_ENABLE_TESTS=OFF \
+	     -B build \
+	     -S .
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd Vulkan-Headers-$pkgver
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+}

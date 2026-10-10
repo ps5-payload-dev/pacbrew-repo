@@ -1,0 +1,2870 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:37 +0000
+Subject: [PATCH] radv/ps5: geometry shaders run as compute, with transform
+ feedback
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  c4113cf51f0 radv/ps5: build poly into the PS5 RADV
+  0792a963086 radv/ps5: compile geometry shaders NGG cannot run as compute (WIP)
+  6232fcc5d59 poly: keep the geometry shader's side effects without a count shader
+  988db82a6ab radv/ps5: draw with geometry shaders run as compute
+  45788501c2f radv/ps5: indirect, multi-draw, byte count and restart draws for GS as compute
+  5e4b690c04b radv/ps5: transform feedback and its queries from geometry shaders
+  8bbc8a9de1d radv/ps5: geometry shaders as compute in graphics pipeline libraries
+  9dcace7f239 radv/ps5: a geometry shader's push constants reach its rasterization copy
+---
+ meson.build                                   |   4 +-
+ src/amd/vulkan/cl/radv_gs_compute.cl          | 213 ++++++
+ src/amd/vulkan/meson.build                    |  35 +-
+ src/amd/vulkan/meta/radv_meta.h               |   3 +
+ src/amd/vulkan/nir/radv_nir_lower_vs_inputs.c |   4 +-
+ src/amd/vulkan/radv_cmd_buffer.c              | 647 +++++++++++++++++-
+ src/amd/vulkan/radv_cmd_buffer.h              |  13 +
+ src/amd/vulkan/radv_gs_compute.c              | 521 ++++++++++++++
+ src/amd/vulkan/radv_gs_compute.h              | 160 +++++
+ src/amd/vulkan/radv_gs_compute_abi.h          |  77 +++
+ src/amd/vulkan/radv_pipeline.h                |   4 +
+ src/amd/vulkan/radv_pipeline_graphics.c       | 128 +++-
+ src/amd/vulkan/radv_pipeline_graphics.h       |  10 +-
+ src/amd/vulkan/radv_query.c                   | 208 +++++-
+ src/amd/vulkan/radv_query.h                   |   4 +
+ src/amd/vulkan/radv_shader_args.c             |   9 +
+ src/amd/vulkan/radv_shader_args.h             |   6 +
+ src/amd/vulkan/radv_shader_info.h             |  13 +
+ src/amd/vulkan/radv_shader_object.c           |   6 +-
+ src/compiler/nir/nir_divergence_analysis.c    |  15 +
+ src/poly/nir/poly_nir_lower_gs.c              |  45 +-
+ 21 files changed, 2066 insertions(+), 59 deletions(-)
+ create mode 100644 src/amd/vulkan/cl/radv_gs_compute.cl
+ create mode 100644 src/amd/vulkan/radv_gs_compute.c
+ create mode 100644 src/amd/vulkan/radv_gs_compute.h
+ create mode 100644 src/amd/vulkan/radv_gs_compute_abi.h
+
+diff --git a/meson.build b/meson.build
+index 930ea6d64c4..fe261a270c0 100644
+--- a/meson.build
++++ b/meson.build
+@@ -979,6 +979,8 @@ with_driver_using_cl = [
+   with_gallium_rusticl,
+   with_nouveau_vk, with_imagination_vk,
+   with_kosmickrisp_vk,
++  # The PS5 RADV runs the geometry shaders NGG cannot as compute, with poly.
++  with_radv_ps5,
+ ].contains(true)
+ 
+ if get_option('mesa-clc') == 'system'
+@@ -997,7 +999,7 @@ with_llvm = with_llvm \
+ 
+ with_poly = [
+   with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
+-  with_kosmickrisp_vk,
++  with_kosmickrisp_vk, with_radv_ps5,
+ ].contains(true)
+ 
+ dep_clc = null_dep
+diff --git a/src/amd/vulkan/cl/radv_gs_compute.cl b/src/amd/vulkan/cl/radv_gs_compute.cl
+new file mode 100644
+index 00000000000..1d2c6e102cc
+--- /dev/null
++++ b/src/amd/vulkan/cl/radv_gs_compute.cl
+@@ -0,0 +1,213 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++/* RADV's OpenCL helpers for geometry shaders run as compute, turned into NIR
++ * builder functions by vtn_bindgen2 as poly's are (radv_gs_compute_abi.h). */
++
++#include "compiler/libcl/libcl.h"
++#include "poly/geometry.h"
++#include "poly/prim.h"
++#include "radv_gs_compute_abi.h"
++
++/* A bump allocation from the command buffer's heap, or false when it does
++ * not fit: the draw then draws nothing rather than write out of bounds. */
++static bool
++heap_alloc(global struct poly_heap *heap, uint64_t size_B, uint *offs_B)
++{
++   if (size_B > heap->size)
++      return false;
++
++   uint size = align((uint)size_B, 16);
++   uint offs = atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size);
++   if (offs > heap->size - size)
++      return false;
++
++   *offs_B = offs;
++   return true;
++}
++
++void
++radv_gs_compute_setup(global struct radv_gs_compute_setup *s)
++{
++   global uint32_t *draw = s->draw;
++   global struct radv_gs_compute_draw *block = s->block;
++   global struct poly_vertex_params *vp = block->vertex_params;
++   global struct poly_geometry_params *p = block->geometry_params;
++   global struct poly_heap *heap = s->heap;
++   const bool indexed = s->index_size_B != 0;
++   const enum poly_gs_shape shape = s->shape;
++
++   uint vertex_count = draw[0];
++   uint instance_count = draw[1];
++   if (s->byte_count) {
++      uint counter = *s->byte_count;
++      vertex_count = counter > s->byte_offset ? (counter - s->byte_offset) / s->byte_stride : 0;
++   }
++   if (s->draw_count && s->draw_index >= *s->draw_count)
++      vertex_count = 0;
++
++   block->first_vertex = indexed ? draw[3] : draw[2];
++   block->base_instance = indexed ? draw[4] : draw[3];
++
++   /* Every size in 64 bits: a draw too large for 32-bit counts or for the
++    * heap draws nothing. */
++   uint64_t prims =
++      vertex_count <= INT32_MAX ? u_decomposed_prims_for_vertices(s->prim, vertex_count) : 0;
++   uint64_t input_prims = prims * instance_count;
++   uint64_t vs_B = (uint64_t)vertex_count * instance_count * util_bitcount64(s->vs_outputs) * 16;
++   uint64_t count_B = input_prims * p->count_buffer_stride;
++   uint64_t index_B = shape == POLY_GS_SHAPE_DYNAMIC_INDEXED ? input_prims * s->max_indices * 4 : 0;
++
++   uint vs_offs = 0, count_offs = 0, index_offs = 0;
++   bool ok = vertex_count && instance_count && vertex_count <= INT32_MAX &&
++             input_prims * max(s->max_indices, 1u) <= UINT32_MAX && heap_alloc(heap, vs_B, &vs_offs) &&
++             (!count_B || heap_alloc(heap, count_B, &count_offs)) &&
++             (!index_B || heap_alloc(heap, index_B, &index_offs));
++   if (!ok) {
++      vertex_count = 0;
++      instance_count = 0;
++   }
++
++   poly_vertex_params_set_draw(vp, vertex_count, instance_count);
++   poly_geometry_params_set_draw(p, s->prim, shape, s->max_indices, vertex_count, instance_count);
++
++   if (ok) {
++      vp->output_buffer = (uintptr_t)(heap->base + vs_offs);
++      if (indexed) {
++         vp->index_size_B = s->index_size_B;
++         vp->index_buffer = draw[2] < s->index_buffer_range_el
++                               ? s->index_buffer + (uint64_t)draw[2] * s->index_size_B
++                               : block->ro_sink;
++         vp->index_buffer_range_el = poly_index_buffer_range_el(s->index_buffer_range_el, draw[2]);
++      }
++      if (count_B)
++         p->count_buffer = (global uint *)(heap->base + count_offs);
++      if (index_B) {
++         p->output_index_buffer = (global uint *)(heap->base + index_offs);
++         p->draw.first_index = index_offs / 4;
++      }
++   }
++
++   s->vs_groups[0] = (vertex_count + RADV_GS_COMPUTE_WAVE - 1) / RADV_GS_COMPUTE_WAVE;
++   s->vs_groups[1] = instance_count;
++   s->vs_groups[2] = 1;
++   s->gs_groups[0] = (p->grid[0] + RADV_GS_COMPUTE_WAVE - 1) / RADV_GS_COMPUTE_WAVE;
++   s->gs_groups[1] = p->grid[1];
++   s->gs_groups[2] = 1;
++}
++
++/* The first invocation of the workgroup where cond holds, or the workgroup
++ * size: the workgroup is one wave, so one ballot sees all of it. */
++static uint
++first_true(bool cond)
++{
++   uint4 ballot = sub_group_ballot(cond);
++   if (ballot.x)
++      return ctz(ballot.x);
++   if (ballot.y)
++      return 32 + ctz(ballot.y);
++   return RADV_GS_COMPUTE_WAVE;
++}
++
++/* poly_unroll_geometry (poly/cl/restart.h) for one wave, allocating from the
++ * heap without aborting. */
++void
++radv_gs_compute_unroll(global struct radv_gs_compute_unroll *u)
++{
++   global uint32_t *in_draw = u->draw;
++   global uint32_t *out_draw = u->out_draw;
++   global struct poly_heap *heap = u->heap;
++   const uint tid = cl_local_id.x;
++   const enum mesa_prim mode = u->prim;
++   const uint per_prim = mesa_vertices_per_prim(mode);
++   const uint size_B = u->index_size_B;
++
++   uint count = in_draw[0];
++   if (u->draw_count && u->draw_index >= *u->draw_count)
++      count = 0;
++
++   /* Restarts only shorten the output: its bound is the input without any. */
++   uint64_t max_prims = count <= INT32_MAX ? u_decomposed_prims_for_vertices(mode, count) : 0;
++   uint offs = 0;
++   uint ok = 0;
++   if (tid == 0)
++      ok = count && heap_alloc(heap, max_prims * per_prim * size_B, &offs);
++   ok = sub_group_broadcast(ok, 0);
++   offs = sub_group_broadcast(offs, 0);
++
++   if (tid == 0) {
++      out_draw[0] = 0;
++      out_draw[1] = in_draw[1];
++      out_draw[2] = offs / size_B;
++      out_draw[3] = in_draw[3];
++      out_draw[4] = in_draw[4];
++   }
++   if (!ok)
++      return;
++
++   uint64_t in_ptr = in_draw[2] < u->index_buffer_range_el
++                        ? u->index_buffer + (uint64_t)in_draw[2] * size_B
++                        : u->ro_sink;
++   uint in_range_el = poly_index_buffer_range_el(u->index_buffer_range_el, in_draw[2]);
++   uint64_t out_ptr = (uintptr_t)(heap->base + offs);
++
++   uint out_prims = 0;
++   uint needle = 0;
++   while (needle < count) {
++      /* The next restart or the end; lanes load in parallel. */
++      uint next_restart = needle;
++      for (;;) {
++         uint idx = next_restart + tid;
++         bool restart = idx >= count || poly_load_index(in_ptr, in_range_el, idx, size_B) == u->restart_index;
++
++         uint next_offs = first_true(restart);
++         next_restart += next_offs;
++         if (next_offs < RADV_GS_COMPUTE_WAVE)
++            break;
++      }
++
++      /* Up to it, decomposed; lanes store in parallel. */
++      uint subcount = next_restart - needle;
++      uint subprims = u_decomposed_prims_for_vertices(mode, subcount);
++      for (uint i = tid; i < subprims; i += RADV_GS_COMPUTE_WAVE) {
++         for (uint vtx = 0; vtx < per_prim; ++vtx) {
++            uint id = poly_vertex_id_for_topology(mode, u->flatshade_first, i, vtx, subprims);
++            uint x = ((out_prims + i) * per_prim) + vtx;
++            uint y = poly_load_index(in_ptr, in_range_el, needle + id, size_B);
++
++            poly_store_index(out_ptr, size_B, x, y);
++         }
++      }
++
++      out_prims += subprims;
++      needle = next_restart + 1;
++   }
++
++   if (tid == 0)
++      out_draw[0] = out_prims * per_prim;
++}
++
++/* The inclusive prefix sum of one word of the count buffer across the draw's
++ * input primitives, for their places in the transform feedback buffers: one
++ * workgroup of one wave per word. */
++void
++radv_gs_compute_prefix_sum(global struct poly_geometry_params *p)
++{
++   const uint word = cl_group_id.x;
++   const uint words = p->count_buffer_stride / 4;
++   const uint len = p->input_primitives;
++   global uint *counts = p->count_buffer;
++
++   uint carry = 0;
++   for (uint base = 0; base < len; base += RADV_GS_COMPUTE_WAVE) {
++      const uint i = base + cl_local_id.x;
++      const uint x = i < len ? counts[i * words + word] : 0;
++      const uint sum = sub_group_scan_inclusive_add(x) + carry;
++      if (i < len)
++         counts[i * words + word] = sum;
++      carry = sub_group_broadcast(sum, RADV_GS_COMPUTE_WAVE - 1);
++   }
++}
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 8c54d04ec5a..acf52578ea2 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -281,6 +281,39 @@ if radv_build_id != ''
+   radv_flags += '-DRADV_BUILD_ID_OVERRIDE="' + radv_build_id + '"'
+ endif
+ 
++# The PS5 RADV runs the geometry shaders NGG cannot as compute, with poly
++# (docs/RADV_GS_COMPUTE.md in PS5_Vulkan).
++radv_link_with = []
++if with_radv_ps5
++  # poly's bindings are compiled into libpoly_nir: RADV needs only their header.
++  radv_deps += declare_dependency(sources : [libpoly_shaders[1]])
++  radv_link_with += libpoly_nir
++  radv_flags += '-DRADV_GS_COMPUTE=1'
++  libradv_files += files('radv_gs_compute.c', 'radv_gs_compute.h', 'radv_gs_compute_abi.h')
++
++  # RADV's own OpenCL helpers for them, NIR builder functions as poly's are.
++  # Without shader asserts: RADV gives these no printf buffer.
++  libradv_cl_spv = custom_target(
++    input : files('cl/radv_gs_compute.cl'),
++    output : 'libradv_cl.spv',
++    command : [
++      prog_mesa_clc, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@', '@INPUT@', '--',
++      '-I' + join_paths(meson.project_source_root(), 'include'),
++      '-I' + join_paths(meson.project_source_root(), 'src/compiler/libcl'),
++      '-I' + join_paths(meson.project_source_root(), 'src'),
++      '-I' + meson.current_source_dir(),
++      cl_args, '-DNDEBUG',
++    ],
++    depfile : 'libradv_cl.spv.d',
++  )
++  libradv_cl = custom_target(
++    input : libradv_cl_spv,
++    output : ['libradv_cl.cpp', 'libradv_cl.h'],
++    command : [prog_vtn_bindgen2, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'],
++  )
++  libradv_files += libradv_cl
++endif
++
+ radv_u_trace = get_option('radv-u_trace')
+ if radv_u_trace
+   radv_flags += '-DRADV_U_TRACE=1'
+@@ -292,7 +325,7 @@ _radv_target = {
+     inc_util, inc_virtio_gpu
+   ],
+   'link_with' : [
+-    libamd_common, libamd_common_llvm, libamdgpu_addrlib,
++    libamd_common, libamd_common_llvm, libamdgpu_addrlib, radv_link_with,
+   ],
+   'dependencies' : [
+     dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
+diff --git a/src/amd/vulkan/meta/radv_meta.h b/src/amd/vulkan/meta/radv_meta.h
+index f581f396b2c..90896d1a0c0 100644
+--- a/src/amd/vulkan/meta/radv_meta.h
++++ b/src/amd/vulkan/meta/radv_meta.h
+@@ -48,6 +48,9 @@ enum radv_meta_object_key_type {
+    RADV_META_OBJECT_KEY_BLIT2D_STENCIL,
+    RADV_META_OBJECT_KEY_BLIT2D_DEPTH_STENCIL,
+    RADV_META_OBJECT_KEY_FILL_MEMORY,
++   RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP,
++   RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL,
++   RADV_META_OBJECT_KEY_GS_COMPUTE_PREFIX_SUM,
+    RADV_META_OBJECT_KEY_COPY_MEMORY,
+    RADV_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER,
+    RADV_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE,
+diff --git a/src/amd/vulkan/nir/radv_nir_lower_vs_inputs.c b/src/amd/vulkan/nir/radv_nir_lower_vs_inputs.c
+index a4fa99fe8f2..28ec8eff30e 100644
+--- a/src/amd/vulkan/nir/radv_nir_lower_vs_inputs.c
++++ b/src/amd/vulkan/nir/radv_nir_lower_vs_inputs.c
+@@ -455,7 +455,9 @@ bool
+ radv_nir_lower_vs_inputs(nir_shader *shader, const struct radv_compiler_info *compiler_info,
+                          const struct radv_shader_stage *vs_stage, const struct radv_graphics_state_key *gfx_state)
+ {
+-   assert(shader->info.stage == MESA_SHADER_VERTEX);
++   /* A vertex shader run as compute before a geometry shader (radv_gs_compute.h)
++    * fetches its attributes the same way. */
++   assert(shader->info.stage == MESA_SHADER_VERTEX || vs_stage->info.gs_compute == RADV_GS_COMPUTE_VS);
+ 
+    lower_vs_inputs_state state = {
+       .info = &vs_stage->info,
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+index 768c85d921d..483791523f4 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -9,6 +9,8 @@
+  */
+ 
+ #include "radv_cmd_buffer.h"
++#include "radv_gs_compute.h"
++#include "poly/geometry.h"
+ #include "meta/radv_meta.h"
+ #include "tools/radv_debug_hang.h"
+ #include "tools/radv_rmv.h"
+@@ -1233,6 +1235,9 @@ radv_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
+          radv_bo_destroy(device, &cmd_buffer->vk.base, cmd_buffer->gfx9_fence_bo_tmz);
+       }
+ 
++      if (cmd_buffer->gs_compute_heap)
++         radv_bo_destroy(device, &cmd_buffer->vk.base, cmd_buffer->gs_compute_heap);
++
+       if (cmd_buffer->gfx9_eop_bug_bo_tmz) {
+          radv_rmv_log_command_buffer_bo_destroy(device, cmd_buffer->gfx9_eop_bug_bo_tmz);
+          radv_bo_destroy(device, &cmd_buffer->vk.base, cmd_buffer->gfx9_eop_bug_bo_tmz);
+@@ -6666,8 +6671,15 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
+    uint32_t internal_stages = stages;
+ 
+    switch (bind_point) {
+-   case VK_PIPELINE_BIND_POINT_GRAPHICS:
++   case VK_PIPELINE_BIND_POINT_GRAPHICS: {
++      /* A geometry shader run as compute has no hardware stage: its
++       * rasterization copy, which runs the shader again, is the vertex stage's
++       * (the passes take their constants at each draw). */
++      const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
++      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && pipeline && pipeline->base.gs_compute)
++         internal_stages |= VK_SHADER_STAGE_VERTEX_BIT;
+       break;
++   }
+    case VK_PIPELINE_BIND_POINT_COMPUTE:
+       break;
+    case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
+@@ -12236,6 +12248,11 @@ radv_get_ngg_state_query(struct radv_cmd_buffer *cmd_buffer)
+    const struct radv_physical_device *pdev = radv_device_physical(device);
+    enum radv_shader_query_state shader_query_state = radv_shader_query_none;
+ 
++   /* The rasterization copy of a geometry shader run as compute counts nothing:
++    * its passes did. */
++   if (cmd_buffer->state.gs_compute_rasterizing)
++      return shader_query_state;
++
+    /* By default shader queries are disabled but they are enabled if the command buffer has active GDS
+     * queries or if it's a secondary command buffer that inherits the number of generated
+     * primitives.
+@@ -14001,6 +14018,589 @@ radv_after_draw(struct radv_cmd_buffer *cmd_buffer)
+    radv_cmd_buffer_after_draw(cmd_buffer, RADV_CMD_FLAG_PS_PARTIAL_FLUSH);
+ }
+ 
++/* Geometry shaders run as compute (radv_gs_compute.h): per draw, the vertex
++ * shader, the geometry shader's count pass and the geometry shader proper as
++ * compute dispatches fed the graphics state, then a draw of the geometry
++ * shader's output through the pipeline's rasterization vertex shader. A draw
++ * whose counts the CPU knows sizes it all here; one whose counts live in
++ * memory (indirect, byte count, primitive restart) is sized by a GPU setup
++ * pass allocating from the command buffer's heap. */
++
++static void radv_emit_dispatch_packets(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *compute_shader,
++                                       const struct radv_dispatch_info *info);
++static void radv_flush_vgt_streamout(struct radv_cmd_buffer *cmd_buffer);
++static void radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compute_meta meta,
++                                      uint64_t args_va, uint32_t x);
++
++#define RADV_GS_COMPUTE_HEAP_SIZE   (64u << 20)
++#define RADV_GS_COMPUTE_HEAP_HEADER 256u
++
++static uint64_t
++radv_gs_compute_upload(struct radv_cmd_buffer *cmd_buffer, unsigned size, const void *data, void **ptr)
++{
++   unsigned offset;
++   void *map;
++
++   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, align(MAX2(size, 4), 4), 256, &offset, &map))
++      return 0;
++   if (data)
++      memcpy(map, data, size);
++   else
++      memset(map, 0, align(MAX2(size, 4), 4));
++   if (ptr)
++      *ptr = map;
++   return radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
++}
++
++uint64_t
++radv_gs_compute_query_counters(struct radv_cmd_buffer *cmd_buffer)
++{
++   if (!cmd_buffer->state.shader_query_buf_va) {
++      void *ptr;
++      const uint64_t va = radv_gs_compute_upload(cmd_buffer, RADV_SHADER_QUERY_BUF_SIZE, NULL, &ptr);
++      cmd_buffer->state.shader_query_buf_va = va;
++   }
++   return cmd_buffer->state.shader_query_buf_va;
++}
++
++/* The command buffer's heap, its header (struct poly_heap) first. Each
++ * recording sets it up at its first use, once the work of an earlier
++ * execution of the command buffer, which may still read it, is done. */
++static uint64_t
++radv_gs_compute_heap(struct radv_cmd_buffer *cmd_buffer)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++
++   if (!cmd_buffer->gs_compute_heap) {
++      VkResult result = radv_bo_create(device, &cmd_buffer->vk.base, RADV_GS_COMPUTE_HEAP_SIZE, 4096,
++                                       RADEON_DOMAIN_VRAM, RADEON_FLAG_NO_INTERPROCESS_SHARING,
++                                       RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &cmd_buffer->gs_compute_heap);
++      if (result != VK_SUCCESS) {
++         vk_command_buffer_set_error(&cmd_buffer->vk, result);
++         return 0;
++      }
++   }
++
++   const uint64_t va = radv_buffer_get_va(cmd_buffer->gs_compute_heap);
++   radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, cmd_buffer->gs_compute_heap);
++
++   if (!cmd_buffer->state.gs_compute_heap_ready) {
++      cmd_buffer->state.flush_bits |=
++         RADV_CMD_FLAG_PS_PARTIAL_FLUSH | RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
++      radv_emit_cache_flush(cmd_buffer);
++
++      const struct poly_heap header = {
++         .base = va + RADV_GS_COMPUTE_HEAP_HEADER,
++         .size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER,
++      };
++      radv_write_data(cmd_buffer, V_371_MICRO_ENGINE, va, sizeof(header) / 4, (const uint32_t *)&header, false);
++      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++      cmd_buffer->state.gs_compute_heap_ready = true;
++   }
++   return va;
++}
++
++/* One compute pass: x by y invocations, or the workgroup counts at
++ * indirect_va. */
++static void
++radv_gs_compute_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *shader, uint64_t draw_va,
++                         uint32_t x, uint32_t y, uint64_t indirect_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_physical_device *pdev = radv_device_physical(device);
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++
++   if (!shader || (!indirect_va && (!x || !y)))
++      return;
++
++   radeon_check_space(device->ws, cs->b, 256);
++
++   cmd_buffer->queue_state.compute_scratch_size_per_wave_needed =
++      MAX2(cmd_buffer->queue_state.compute_scratch_size_per_wave_needed, shader->config.scratch_bytes_per_wave);
++   cmd_buffer->queue_state.compute_scratch_waves_wanted =
++      MAX2(cmd_buffer->queue_state.compute_scratch_waves_wanted,
++           radv_get_max_scratch_waves(device, (struct radv_shader *)shader));
++
++   radv_emit_compute_shader(pdev, cs, shader);
++
++   /* The graphics state's descriptor sets and push constants, all of them. */
++   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
++   if (descriptors->need_indirect_descriptors)
++      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
++   const uint32_t dirty = descriptors->dirty;
++   descriptors->dirty = descriptors->valid;
++   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
++   descriptors->dirty = dirty;
++
++   const struct radv_push_constant_state *push_constants =
++      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
++   uint64_t push_constants_va = 0;
++   if (push_constants->size)
++      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
++   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
++
++   radv_emit_userdata_address(device, cs, shader, AC_UD_CS_GS_COMPUTE_DRAW, draw_va);
++
++   if (shader->info.gs_compute == RADV_GS_COMPUTE_VS && shader->info.vs.vb_desc_usage_mask) {
++      void *vb_ptr;
++      const uint64_t vb_va = radv_gs_compute_upload(
++         cmd_buffer, util_bitcount(shader->info.vs.vb_desc_usage_mask) * 16, NULL, &vb_ptr);
++      radv_write_vertex_descriptors(cmd_buffer, shader, vb_ptr);
++      radv_emit_userdata_address(device, cs, shader, AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS, vb_va);
++   }
++
++   radv_emit_cache_flush(cmd_buffer);
++
++   const struct radv_dispatch_info info = {
++      .blocks = {x, y, 1},
++      .unaligned = !indirect_va,
++      .indirect_va = indirect_va,
++   };
++   radv_emit_dispatch_packets(cmd_buffer, shader, &info);
++
++   /* What the next pass reads is written through the vector cache. */
++   cmd_buffer->state.flush_bits |=
++      RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++}
++
++/* poly's parameters and the draw block, as far as the CPU knows them. With
++ * transform feedback active, returns where the buffers' offsets go for the
++ * passes (radv_gs_compute_run_passes), else 0. */
++static uint64_t
++radv_gs_compute_prepare(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
++                        enum mesa_prim mode, struct poly_vertex_params *vp, struct poly_geometry_params *gp,
++                        struct radv_gs_compute_draw *block)
++{
++   const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
++   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
++   const uint32_t wg_size[3] = {RADV_GS_COMPUTE_WAVE, 1, 1};
++
++   poly_vertex_params_init(vp, gsc->vs_outputs, wg_size);
++   poly_geometry_params_init(gp, mode, wg_size);
++
++   /* Primitives generated and written per stream count into the command
++    * buffer's counters, which queries sample. */
++   const uint64_t sink = radv_gs_compute_upload(cmd_buffer, 256, NULL, NULL);
++   const uint64_t counters = radv_gs_compute_query_counters(cmd_buffer);
++   for (unsigned i = 0; i < POLY_MAX_VERTEX_STREAMS; i++) {
++      gp->prims_generated_counter[i] = counters ? counters + RADV_SHADER_QUERY_PRIM_GEN_OFFSET(i) : sink;
++      gp->xfb_prims_generated_counter[i] = counters ? counters + RADV_SHADER_QUERY_PRIM_XFB_OFFSET(i) : sink;
++      gp->xfb_overflow[i] = sink;
++   }
++   gp->xfb_any_overflow = sink;
++
++   /* Transform feedback goes to the bound buffers from the offsets the
++    * hardware holds (radv_gs_compute_save_streamout); without it, nowhere. */
++   const bool xfb = gsc->info.xfb && so->streamout_enabled && so->enabled_mask;
++   const uint64_t offsets = radv_gs_compute_upload(cmd_buffer, 4 * POLY_MAX_SO_BUFFERS, NULL, NULL);
++   for (unsigned i = 0; i < POLY_MAX_SO_BUFFERS; i++) {
++      const bool bound = xfb && (so->enabled_mask & BITFIELD_BIT(i));
++      gp->xfb_offs_ptrs[i] = offsets + 4 * i;
++      gp->xfb_base_original[i] = bound ? so->bindings[i].va : sink;
++      gp->xfb_base[i] = gp->xfb_base_original[i];
++      gp->xfb_size[i] = bound ? MIN2(so->bindings[i].size, UINT32_MAX) : 0;
++   }
++   gp->count_buffer_stride = gsc->info.count_words * 4;
++
++   *block = (struct radv_gs_compute_draw){
++      .ro_sink = sink,
++      .input_topology = mode,
++      .provoking_last = d->vk.rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
++      .rasterization_stream = d->vk.rs.rasterization_stream,
++   };
++   return xfb ? offsets : 0;
++}
++
++/* Transform feedback of a geometry shader run as compute continues from the
++ * offsets hardware streamout holds: they go to memory for the passes, which
++ * advance them, and back before the next draw. */
++static void
++radv_gs_compute_save_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t offsets_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++
++   radv_flush_vgt_streamout(cmd_buffer);
++
++   radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 6);
++   radeon_begin(cs);
++   u_foreach_bit (i, so->enabled_mask) {
++      radeon_emit(PKT3(PKT3_STRMOUT_BUFFER_UPDATE, 4, 0));
++      radeon_emit(STRMOUT_SELECT_BUFFER(i) | STRMOUT_DATA_TYPE(1) | /* offset in bytes */
++                  STRMOUT_OFFSET_SOURCE(STRMOUT_OFFSET_NONE) | STRMOUT_STORE_BUFFER_FILLED_SIZE);
++      radeon_emit(offsets_va + 4 * i);
++      radeon_emit((offsets_va + 4 * i) >> 32);
++      radeon_emit(0);
++      radeon_emit(0);
++   }
++   radeon_end();
++
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++}
++
++static void
++radv_gs_compute_restore_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t offsets_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++
++   /* The passes are done with the offsets, and the prefetch parser waits. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
++   radv_emit_cache_flush(cmd_buffer);
++
++   radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 6);
++   radeon_begin(cs);
++   u_foreach_bit (i, so->enabled_mask) {
++      radeon_emit(PKT3(PKT3_STRMOUT_BUFFER_UPDATE, 4, 0));
++      radeon_emit(STRMOUT_SELECT_BUFFER(i) | STRMOUT_DATA_TYPE(1) | /* offset in bytes */
++                  STRMOUT_OFFSET_SOURCE(STRMOUT_OFFSET_FROM_MEM));
++      radeon_emit(0);
++      radeon_emit(0);
++      radeon_emit(offsets_va + 4 * i);
++      radeon_emit((offsets_va + 4 * i) >> 32);
++   }
++   radeon_end();
++}
++
++/* The vertex shader, the count pass, the prefix sum of the counts, the
++ * pre-GS setup and the geometry shader proper, sized by the CPU or by the
++ * setup pass at setup_va. xfb_offsets_va holds the transform feedback
++ * offsets while they run, if transform feedback is active. */
++static void
++radv_gs_compute_run_passes(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
++                           uint64_t draw_va, uint64_t gp_va, uint32_t vertices, uint32_t prims, uint32_t instances,
++                           uint64_t setup_va, uint64_t xfb_offsets_va)
++{
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   const uint64_t vs_groups = setup_va ? setup_va + offsetof(struct radv_gs_compute_setup, vs_groups) : 0;
++   const uint64_t gs_groups = setup_va ? setup_va + offsetof(struct radv_gs_compute_setup, gs_groups) : 0;
++
++   if (xfb_offsets_va)
++      radv_gs_compute_save_streamout(cmd_buffer, xfb_offsets_va);
++
++   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)], draw_va, vertices,
++                            instances, vs_groups);
++   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)], draw_va, prims,
++                            instances, gs_groups);
++   if (gsc->info.prefix_sum) {
++      radv_meta_begin(cmd_buffer);
++      radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
++      radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_PREFIX_SUM, gp_va,
++                                gsc->info.count_words * RADV_GS_COMPUTE_WAVE);
++      radv_meta_end(cmd_buffer);
++   }
++   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)], draw_va, 1, 1, 0);
++   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)], draw_va, prims,
++                            instances, gs_groups);
++
++   if (xfb_offsets_va)
++      radv_gs_compute_restore_streamout(cmd_buffer, xfb_offsets_va);
++
++   /* The application's compute state comes back before its next dispatch. */
++   state->dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
++   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
++}
++
++/* The rasterization draw of poly's output topology, strips cut by restart:
++ * the counts in direct, or in memory at indirect_va (struct
++ * poly_indirect_draw). */
++static void
++radv_gs_compute_rasterize(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
++                          uint64_t draw_va, uint64_t index_va, uint32_t max_index_count,
++                          const struct poly_indirect_draw *direct, uint64_t indirect_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   struct radv_dynamic_state *d = &state->dynamic;
++
++   const uint32_t saved_topology = d->vk.ia.primitive_topology;
++   const bool saved_restart = d->vk.ia.primitive_restart_enable;
++   const uint32_t saved_restart_index = state->primitive_restart_index;
++   const struct radv_index_buffer_state saved_index_buffer = state->index_buffer;
++   const bool indexed = poly_gs_indexed(gsc->info.shape);
++
++   d->vk.ia.primitive_topology = radv_gs_compute_rast_topology(gsc->info.mode);
++   d->vk.ia.primitive_restart_enable = indexed;
++   state->dirty_dynamic |= RADV_DYNAMIC_PRIMITIVE_TOPOLOGY | RADV_DYNAMIC_PRIMITIVE_RESTART_ENABLE;
++   if (indexed) {
++      const VkIndexType type =
++         gsc->info.shape == POLY_GS_SHAPE_DYNAMIC_INDEXED ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT8;
++      state->index_buffer.va = index_va;
++      state->index_buffer.index_type = vk_to_index_type(type);
++      state->index_buffer.max_index_count = max_index_count;
++      state->primitive_restart_index = radv_get_primitive_restart_index(type);
++      state->dirty |= RADV_CMD_DIRTY_INDEX_BUFFER;
++   }
++
++   /* Neither hardware streamout nor the NGG shader's query counting sees the
++    * rasterization copy: the passes wrote and counted. */
++   const bool saved_suspended = state->streamout.suspended;
++   state->streamout.suspended = true;
++   state->gs_compute_rasterizing = true;
++   state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
++
++   const struct radv_draw_info rast = {
++      .count = direct ? direct->index_count : 1,
++      .instance_count = direct ? direct->instance_count : 0,
++      .indexed = indexed,
++      .indirect_va = direct ? 0 : indirect_va,
++      .stride = sizeof(struct poly_indirect_draw),
++   };
++   if (radv_before_draw(cmd_buffer, &rast, 1, false)) {
++      radv_emit_userdata_address(device, cmd_buffer->cs, state->shaders[MESA_SHADER_VERTEX], AC_UD_VS_GS_COMPUTE_DRAW,
++                                 draw_va);
++      if (!direct) {
++         radv_emit_indirect_draw_packets(cmd_buffer, &rast);
++      } else if (indexed) {
++         const VkMultiDrawIndexedInfoEXT minfo = {0, rast.count, 0};
++         radv_emit_draw_packets_indexed(cmd_buffer, &rast, 1, &minfo, 0, NULL);
++      } else {
++         const VkMultiDrawInfoEXT minfo = {0, rast.count};
++         radv_emit_direct_draw_packets(cmd_buffer, &rast, 1, &minfo, 0, 0);
++      }
++      radv_after_draw(cmd_buffer);
++   }
++
++   state->streamout.suspended = saved_suspended;
++   state->gs_compute_rasterizing = false;
++   state->dirty |= RADV_CMD_DIRTY_STREAMOUT_ENABLE | RADV_CMD_DIRTY_SHADER_QUERY;
++   d->vk.ia.primitive_topology = saved_topology;
++   d->vk.ia.primitive_restart_enable = saved_restart;
++   state->primitive_restart_index = saved_restart_index;
++   state->index_buffer = saved_index_buffer;
++   state->dirty_dynamic |= RADV_DYNAMIC_PRIMITIVE_TOPOLOGY | RADV_DYNAMIC_PRIMITIVE_RESTART_ENABLE;
++   state->dirty |= RADV_CMD_DIRTY_INDEX_BUFFER;
++   state->last_index_type = -1;
++}
++
++/* One meta pass over the argument block at args_va, of x invocations. */
++static void
++radv_gs_compute_meta_pass(struct radv_cmd_buffer *cmd_buffer, enum radv_gs_compute_meta meta, uint64_t args_va,
++                          uint32_t x)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   VkPipelineLayout layout;
++   VkPipeline pipeline;
++
++   VkResult result = radv_gs_compute_get_meta_pipeline(device, meta, &pipeline, &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, result);
++      return;
++   }
++
++   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
++   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args_va), &args_va);
++   radv_unaligned_dispatch(cmd_buffer, x, 1, 1);
++
++   /* The passes after it read what it wrote, the command processor too. */
++   cmd_buffer->state.flush_bits |=
++      RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++}
++
++/* A draw whose counts live in memory: draw_va holds a
++ * VkDraw[Indexed]IndirectCommand, draw_count_va (if not 0) the count of an
++ * indirect count draw, byte_count_va (if not 0) the counter of a byte count
++ * draw. */
++static void
++radv_gs_compute_draw_gpu(struct radv_cmd_buffer *cmd_buffer, const struct radv_gs_compute_pipeline *gsc,
++                         bool indexed, uint64_t draw_va, uint64_t draw_count_va, uint32_t draw_index,
++                         uint64_t byte_count_va, uint32_t byte_offset, uint32_t byte_stride)
++{
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   const struct radv_dynamic_state *d = &state->dynamic;
++
++   const uint64_t heap_va = radv_gs_compute_heap(cmd_buffer);
++   if (!heap_va)
++      return;
++   const uint64_t heap_base = heap_va + RADV_GS_COMPUTE_HEAP_HEADER;
++   const uint32_t heap_size = RADV_GS_COMPUTE_HEAP_SIZE - RADV_GS_COMPUTE_HEAP_HEADER;
++
++   enum mesa_prim mode = radv_gs_compute_input_prim(d->vk.ia.primitive_topology);
++   uint64_t index_va = 0;
++   uint32_t index_range_el = 0, index_size = 0;
++   if (indexed) {
++      index_size = radv_get_vgt_index_size(state->index_buffer.index_type);
++      index_va = state->index_buffer.va;
++      index_range_el = state->index_buffer.max_index_count;
++   }
++
++   struct poly_vertex_params vp;
++   struct poly_geometry_params gp;
++   struct radv_gs_compute_draw block;
++
++   radv_meta_begin(cmd_buffer);
++   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
++
++   /* Primitive restart: first an indexed draw of the decomposed list
++    * topology without restarts, in the heap. */
++   if (indexed && d->vk.ia.primitive_restart_enable) {
++      const uint64_t sink = radv_gs_compute_upload(cmd_buffer, 256, NULL, NULL);
++      const struct radv_gs_compute_unroll unroll = {
++         .draw = draw_va,
++         .draw_count = draw_count_va,
++         .out_draw = radv_gs_compute_upload(cmd_buffer, sizeof(VkDrawIndexedIndirectCommand), NULL, NULL),
++         .heap = heap_va,
++         .index_buffer = index_va,
++         .ro_sink = sink,
++         .index_buffer_range_el = index_range_el,
++         .index_size_B = index_size,
++         .restart_index = state->primitive_restart_index,
++         .flatshade_first = d->vk.rs.provoking_vertex != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
++         .prim = mode,
++         .draw_index = draw_index,
++      };
++      radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_UNROLL,
++                                radv_gs_compute_upload(cmd_buffer, sizeof(unroll), &unroll, NULL), RADV_GS_COMPUTE_WAVE);
++
++      draw_va = unroll.out_draw;
++      draw_count_va = 0;
++      index_va = heap_base;
++      index_range_el = heap_size / index_size;
++      mode = u_decomposed_prim(mode);
++   }
++
++   const uint64_t xfb_offsets_va = radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
++   const uint64_t gp_va = radv_gs_compute_upload(cmd_buffer, sizeof(gp), &gp, NULL);
++   block.vertex_params = radv_gs_compute_upload(cmd_buffer, sizeof(vp), &vp, NULL);
++   block.geometry_params = gp_va;
++   block.draw_id = draw_index;
++   const uint64_t block_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
++
++   const struct radv_gs_compute_setup setup = {
++      .draw = draw_va,
++      .draw_count = draw_count_va,
++      .byte_count = byte_count_va,
++      .block = block_va,
++      .heap = heap_va,
++      .index_buffer = index_va,
++      .vs_outputs = gsc->vs_outputs,
++      .index_buffer_range_el = index_range_el,
++      .index_size_B = index_size,
++      .draw_index = draw_index,
++      .byte_offset = byte_offset,
++      .byte_stride = byte_stride,
++      .prim = mode,
++      .shape = gsc->info.shape,
++      .max_indices = gsc->info.max_indices,
++   };
++   const uint64_t setup_va = radv_gs_compute_upload(cmd_buffer, sizeof(setup), &setup, NULL);
++   radv_gs_compute_meta_pass(cmd_buffer, RADV_GS_COMPUTE_META_SETUP, setup_va, 1);
++
++   radv_meta_end(cmd_buffer);
++
++   radv_gs_compute_run_passes(cmd_buffer, gsc, block_va, gp_va, 0, 0, 0, setup_va, xfb_offsets_va);
++
++   uint64_t rast_index_va = 0;
++   uint32_t rast_max_index_count = 0;
++   if (gsc->info.shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
++      rast_index_va = heap_base;
++      rast_max_index_count = heap_size / 4;
++   } else if (gsc->info.shape == POLY_GS_SHAPE_STATIC_INDEXED) {
++      rast_index_va = radv_gs_compute_upload(cmd_buffer, gsc->info.max_indices, gsc->info.topology, NULL);
++      rast_max_index_count = gsc->info.max_indices;
++   }
++   radv_gs_compute_rasterize(cmd_buffer, gsc, block_va, rast_index_va, rast_max_index_count, NULL,
++                             gp_va + offsetof(struct poly_geometry_params, draw));
++}
++
++static const struct radv_gs_compute_pipeline *
++radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer)
++{
++   const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
++   return pipeline ? pipeline->base.gs_compute : NULL;
++}
++
++/* A draw whose counts the CPU knows. Returns false when the bound pipeline
++ * has no geometry shader run as compute, for the caller to draw as usual. */
++static bool
++radv_gs_compute_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t first,
++                     int32_t vertex_offset, uint32_t draw_id)
++{
++   const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
++   if (!gsc)
++      return false;
++
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   const struct radv_dynamic_state *d = &state->dynamic;
++
++   if (!info->count || !info->instance_count)
++      return true;
++
++   /* Primitive restart needs the index values: the GPU unrolls them. */
++   if (info->indexed && d->vk.ia.primitive_restart_enable) {
++      const VkDrawIndexedIndirectCommand args = {info->count, info->instance_count, first, vertex_offset,
++                                                 info->first_instance};
++      radv_gs_compute_draw_gpu(cmd_buffer, gsc, true, radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL),
++                               0, draw_id, 0, 0, 0);
++      return true;
++   }
++
++   const enum mesa_prim mode = radv_gs_compute_input_prim(d->vk.ia.primitive_topology);
++   struct poly_vertex_params vp;
++   struct poly_geometry_params gp;
++   struct radv_gs_compute_draw block;
++   const uint64_t xfb_offsets_va = radv_gs_compute_prepare(cmd_buffer, gsc, mode, &vp, &gp, &block);
++
++   /* The vertex stream, and where the vertex shader's outputs go. */
++   poly_vertex_params_set_draw(&vp, info->count, info->instance_count);
++   if (info->indexed) {
++      const unsigned index_size = radv_get_vgt_index_size(state->index_buffer.index_type);
++      vp.index_buffer = state->index_buffer.va + (uint64_t)first * index_size;
++      vp.index_buffer_range_el = poly_index_buffer_range_el(state->index_buffer.max_index_count, first);
++      vp.index_size_B = index_size;
++      if (!vp.index_buffer_range_el)
++         vp.index_buffer = block.ro_sink;
++   }
++   const uint64_t output_bytes =
++      (uint64_t)info->count * info->instance_count * util_bitcount64(gsc->vs_outputs) * 16;
++   vp.output_buffer = radv_gs_compute_upload(cmd_buffer, MAX2(output_bytes, 16), NULL, NULL);
++
++   /* The geometry shader's grid, counts and output indices. */
++   poly_geometry_params_set_draw(&gp, mode, gsc->info.shape, gsc->info.max_indices, info->count,
++                                 info->instance_count);
++   if (gp.count_buffer_stride)
++      gp.count_buffer = radv_gs_compute_upload(cmd_buffer, MAX2(gp.input_primitives * gp.count_buffer_stride, 16),
++                                               NULL, NULL);
++   uint64_t rast_index_va = 0;
++   if (gsc->info.shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
++      gp.output_index_buffer = radv_gs_compute_upload(cmd_buffer, gp.draw.index_count * 4, NULL, NULL);
++      rast_index_va = gp.output_index_buffer;
++   } else if (gsc->info.shape == POLY_GS_SHAPE_STATIC_INDEXED) {
++      rast_index_va = radv_gs_compute_upload(cmd_buffer, gsc->info.max_indices, gsc->info.topology, NULL);
++   }
++
++   block.vertex_params = radv_gs_compute_upload(cmd_buffer, sizeof(vp), &vp, NULL);
++   block.geometry_params = radv_gs_compute_upload(cmd_buffer, sizeof(gp), &gp, NULL);
++   block.first_vertex = info->indexed ? (uint32_t)vertex_offset : first;
++   block.base_instance = info->first_instance;
++   block.draw_id = draw_id;
++   const uint64_t draw_va = radv_gs_compute_upload(cmd_buffer, sizeof(block), &block, NULL);
++
++   const struct poly_indirect_draw rast = gp.draw;
++   radv_gs_compute_run_passes(cmd_buffer, gsc, draw_va, block.geometry_params, info->count, gp.grid[0],
++                              info->instance_count, 0, xfb_offsets_va);
++   radv_gs_compute_rasterize(cmd_buffer, gsc, draw_va, rast_index_va, rast.index_count, &rast, 0);
++   return true;
++}
++
++/* Draws whose counts live in memory. Returns false as radv_gs_compute_draw. */
++static bool
++radv_gs_compute_draw_indirect(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info)
++{
++   const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
++   if (!gsc)
++      return false;
++
++   for (uint32_t i = 0; i < info->count; i++)
++      radv_gs_compute_draw_gpu(cmd_buffer, gsc, info->indexed, info->indirect_va + (uint64_t)i * info->stride,
++                               info->count_va, i, 0, 0, 0);
++   return true;
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ radv_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex,
+              uint32_t firstInstance)
+@@ -14015,6 +14615,9 @@ radv_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t insta
+    info.indirect_va = 0;
+    info.indexed = false;
+ 
++   if (radv_gs_compute_draw(cmd_buffer, &info, firstVertex, 0, 0))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    const VkMultiDrawInfoEXT minfo = {firstVertex, vertexCount};
+@@ -14039,6 +14642,15 @@ radv_CmdDrawMultiEXT(VkCommandBuffer commandBuffer, uint32_t drawCount, const Vk
+    info.indirect_va = 0;
+    info.indexed = false;
+ 
++   if (radv_gs_compute_bound(cmd_buffer)) {
++      uint32_t i = 0;
++      vk_foreach_multi_draw (draw, i, pVertexInfo, drawCount, stride) {
++         info.count = draw->vertexCount;
++         radv_gs_compute_draw(cmd_buffer, &info, draw->firstVertex, 0, i);
++      }
++      return;
++   }
++
+    if (!radv_before_draw(cmd_buffer, &info, drawCount, false))
+       return;
+    radv_emit_direct_draw_packets(cmd_buffer, &info, drawCount, pVertexInfo, 0, stride);
+@@ -14059,6 +14671,9 @@ radv_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t
+    info.strmout_va = 0;
+    info.indirect_va = 0;
+ 
++   if (radv_gs_compute_draw(cmd_buffer, &info, firstIndex, vertexOffset, 0))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    const VkMultiDrawIndexedInfoEXT minfo = {firstIndex, indexCount, vertexOffset};
+@@ -14085,6 +14700,16 @@ radv_CmdDrawMultiIndexedEXT(VkCommandBuffer commandBuffer, uint32_t drawCount,
+    info.strmout_va = 0;
+    info.indirect_va = 0;
+ 
++   if (radv_gs_compute_bound(cmd_buffer)) {
++      uint32_t i = 0;
++      vk_foreach_multi_draw_indexed (draw, i, pIndexInfo, drawCount, stride) {
++         info.count = draw->indexCount;
++         radv_gs_compute_draw(cmd_buffer, &info, draw->firstIndex, pVertexOffset ? *pVertexOffset : draw->vertexOffset,
++                              i);
++      }
++      return;
++   }
++
+    if (!radv_before_draw(cmd_buffer, &info, drawCount, false))
+       return;
+    radv_emit_draw_packets_indexed(cmd_buffer, &info, drawCount, pIndexInfo, stride, pVertexOffset);
+@@ -14126,6 +14751,9 @@ radv_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer, const VkDrawIndirect2Inf
+    info.indexed = false;
+    info.instance_count = 0;
+ 
++   if (radv_gs_compute_draw_indirect(cmd_buffer, &info))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    radv_emit_indirect_draw_packets(cmd_buffer, &info);
+@@ -14167,6 +14795,9 @@ radv_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer, const VkDrawIndir
+    info.strmout_va = 0;
+    info.instance_count = 0;
+ 
++   if (radv_gs_compute_draw_indirect(cmd_buffer, &info))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    radv_emit_indirect_draw_packets(cmd_buffer, &info);
+@@ -14212,6 +14843,9 @@ radv_CmdDrawIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDrawIndirec
+    info.indexed = false;
+    info.instance_count = 0;
+ 
++   if (radv_gs_compute_draw_indirect(cmd_buffer, &info))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    radv_emit_indirect_draw_packets(cmd_buffer, &info);
+@@ -14258,6 +14892,9 @@ radv_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDraw
+    info.strmout_va = 0;
+    info.instance_count = 0;
+ 
++   if (radv_gs_compute_draw_indirect(cmd_buffer, &info))
++      return;
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    radv_emit_indirect_draw_packets(cmd_buffer, &info);
+@@ -16731,6 +17368,14 @@ radv_CmdDrawIndirectByteCount2EXT(VkCommandBuffer commandBuffer, uint32_t instan
+    info.indexed = false;
+    info.indirect_va = 0;
+ 
++   const struct radv_gs_compute_pipeline *gsc = radv_gs_compute_bound(cmd_buffer);
++   if (gsc) {
++      const VkDrawIndirectCommand args = {0, instanceCount, 0, firstInstance};
++      radv_gs_compute_draw_gpu(cmd_buffer, gsc, false, radv_gs_compute_upload(cmd_buffer, sizeof(args), &args, NULL),
++                               0, 0, pCounterInfo->addressRange.address, counterOffset, vertexStride);
++      return;
++   }
++
+    if (!radv_before_draw(cmd_buffer, &info, 1, false))
+       return;
+    struct VkMultiDrawInfoEXT minfo = {0, 0};
+diff --git a/src/amd/vulkan/radv_cmd_buffer.h b/src/amd/vulkan/radv_cmd_buffer.h
+index d0c4fd3e50c..8ab75d1eaf6 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.h
++++ b/src/amd/vulkan/radv_cmd_buffer.h
+@@ -359,6 +359,12 @@ struct radv_cmd_state {
+    uint64_t dirty;
+    uint64_t dirty_dynamic;
+ 
++   /* Whether this recording has set up gs_compute_heap. */
++   bool gs_compute_heap_ready;
++   /* Whether the draw is a geometry shader's rasterization copy (its compute
++    * passes counted for the queries). */
++   bool gs_compute_rasterizing;
++
+    VkShaderStageFlags active_stages;
+    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
+    struct radv_shader_object *shader_objs[MESA_VULKAN_SHADER_STAGES];
+@@ -559,6 +565,9 @@ struct radv_cmd_buffer {
+ 
+    struct radeon_winsys_bo *gfx9_fence_bo_tmz;
+    struct radeon_winsys_bo *gfx9_eop_bug_bo_tmz;
++   /* The GPU heap of geometry shader draws run as compute whose counts live
++    * in memory (radv_gs_compute_abi.h). */
++   struct radeon_winsys_bo *gs_compute_heap;
+    uint64_t gfx9_fence_va;
+    uint32_t gfx9_fence_idx;
+    uint64_t gfx9_eop_bug_va;
+@@ -885,4 +894,8 @@ radv_resume_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
+    cond_render->suspended = false;
+ }
+ 
++/* The command buffer's memory counters (RADV_SHADER_QUERY_*) of what
++ * geometry shaders run as compute generate and write, which queries sample. */
++uint64_t radv_gs_compute_query_counters(struct radv_cmd_buffer *cmd_buffer);
++
+ #endif /* RADV_CMD_BUFFER_H */
+diff --git a/src/amd/vulkan/radv_gs_compute.c b/src/amd/vulkan/radv_gs_compute.c
+new file mode 100644
+index 00000000000..c8614be6f95
+--- /dev/null
++++ b/src/amd/vulkan/radv_gs_compute.c
+@@ -0,0 +1,521 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Geometry shaders the hardware cannot run, as compute: see radv_gs_compute.h. */
++
++#include "radv_gs_compute.h"
++
++#include "nir/radv_nir.h"
++#include "nir_builder.h"
++#include "radv_pipeline.h"
++#include "radv_shader.h"
++#include "radv_shader_args.h"
++#include "radv_shader_info.h"
++
++#include "ac_nir.h"
++#include "libradv_cl.h"
++#include "meta/radv_meta.h"
++#include "nir/radv_meta_nir.h"
++#include "poly/cl/libpoly.h"
++#include "poly/geometry.h"
++#include "radv_device.h"
++#include "util/u_debug.h"
++#include "vk_shader_module.h"
++
++bool
++radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const struct radv_graphics_state_key *gfx_state,
++                       const struct radv_shader_stage *stages)
++{
++   const nir_shader *gs = stages[MESA_SHADER_GEOMETRY].nir;
++
++   if (!compiler_info->key.no_legacy_gs || !gs || !stages[MESA_SHADER_VERTEX].nir)
++      return false;
++
++   /* So far: a vertex shader feeding the geometry shader, with its vertex input
++    * known when the pipeline is compiled. */
++   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir || gfx_state->vs.has_prolog)
++      return false;
++
++   /* Transform feedback from a geometry shader, which NGG cannot capture here
++    * (radv_gs_compute.h); every geometry shader when forced for testing. */
++   return gs->xfb_info || debug_get_bool_option("RADV_PS5_GS_COMPUTE", false);
++}
++
++/* The vertex shader's outputs go to memory, indexed by the invocation's place
++ * in the unrolled vertex stream (x) and its instance (y), where poly's
++ * geometry shader reads its inputs. */
++static bool
++lower_vs_output_to_memory(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_store_output)
++      return false;
++
++   const uint64_t outputs = *(const uint64_t *)data;
++   b->cursor = nir_instr_remove(&intr->instr);
++
++   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
++   nir_def *location = nir_iadd_imm(b, intr->src[1].ssa, sem.location);
++   nir_def *vp = nir_load_vertex_param_buffer_poly(b);
++   nir_def *id = nir_load_global_invocation_id(b, 32);
++   nir_def *linear = nir_iadd(b, nir_imul(b, nir_channel(b, id, 1), poly_input_vertices(b, vp)), nir_channel(b, id, 0));
++   nir_def *addr = poly_vertex_output_address(b, vp, nir_imm_int64(b, outputs), linear, location);
++
++   assert(nir_src_bit_size(intr->src[0]) <= 32);
++   addr = nir_iadd_imm(b, addr, nir_intrinsic_component(intr) * 4);
++   nir_store_global(b, intr->src[0].ssa, addr, .write_mask = nir_intrinsic_write_mask(intr));
++   return true;
++}
++
++/* Memory writes of the application's own (buffers, images, device addresses)
++ * happen once per invocation, in one copy of the geometry shader: the other
++ * copies drop them. poly strips the global and bindless forms; these are
++ * RADV's, still derefs and SSBO intrinsics when poly runs. An atomic whose
++ * result is used stays. */
++static bool
++strip_app_memory_writes(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   switch (intr->intrinsic) {
++   case nir_intrinsic_store_ssbo:
++   case nir_intrinsic_image_deref_store:
++   case nir_intrinsic_image_store:
++   case nir_intrinsic_bindless_image_store:
++      nir_instr_remove(&intr->instr);
++      return true;
++
++   case nir_intrinsic_store_deref: {
++      nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
++      if (!nir_deref_mode_is_one_of(deref, nir_var_mem_ssbo | nir_var_mem_global | nir_var_image))
++         return false;
++      nir_instr_remove(&intr->instr);
++      return true;
++   }
++
++   case nir_intrinsic_ssbo_atomic:
++   case nir_intrinsic_ssbo_atomic_swap:
++   case nir_intrinsic_deref_atomic:
++   case nir_intrinsic_deref_atomic_swap:
++   case nir_intrinsic_image_deref_atomic:
++   case nir_intrinsic_image_deref_atomic_swap:
++   case nir_intrinsic_global_atomic:
++   case nir_intrinsic_global_atomic_swap:
++      if (nir_intrinsic_infos[intr->intrinsic].has_dest && !list_is_empty(&intr->def.uses))
++         return false;
++      if (intr->intrinsic == nir_intrinsic_deref_atomic || intr->intrinsic == nir_intrinsic_deref_atomic_swap) {
++         nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
++         if (!nir_deref_mode_is_one_of(deref, nir_var_mem_ssbo | nir_var_mem_global))
++            return false;
++      }
++      nir_instr_remove(&intr->instr);
++      return true;
++
++   default:
++      return false;
++   }
++}
++
++static void
++strip_side_effects(nir_shader *nir)
++{
++   bool progress;
++   do {
++      progress = false;
++      NIR_PASS(progress, nir, nir_shader_intrinsics_pass, strip_app_memory_writes, nir_metadata_control_flow, NULL);
++      NIR_PASS(progress, nir, nir_opt_dce);
++      NIR_PASS(progress, nir, nir_opt_dead_cf);
++   } while (progress);
++}
++
++void
++radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
++                      struct radv_gs_compute_nir *out)
++{
++   struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
++   struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
++   nir_shader *vs = vs_stage->nir;
++   nir_shader *gs = gs_stage->nir;
++
++   memset(out, 0, sizeof(*out));
++
++   radv_nir_lower_io(vs);
++   radv_nir_lower_io(gs);
++   NIR_PASS(_, vs, nir_lower_vars_to_ssa);
++   NIR_PASS(_, gs, nir_lower_vars_to_ssa);
++   radv_optimize_nir(vs, vs_stage->key.optimisations_disabled);
++   radv_optimize_nir(gs, gs_stage->key.optimisations_disabled);
++   /* poly keeps the memory writes in a count pass only when the shader's
++    * information says it writes memory: gather it again after lowering. */
++   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
++   nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
++
++   /* The vertex shader: its outputs to memory, where the geometry shader reads
++    * them. The mask fixes the layout both sides use. */
++   out->vs_outputs = vs->info.outputs_written;
++   NIR_PASS(_, vs, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow,
++            &out->vs_outputs);
++
++   /* The geometry shader: poly's count pass, pre-GS setup, the GS proper and
++    * the rasterization copy. */
++   nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
++   NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
++
++   /* The application's memory writes happen once per invocation: in the count
++    * pass when poly made one, in the GS proper otherwise (static counts). The
++    * rasterization copy runs the shader again per output vertex and never
++    * keeps them. */
++   if (count)
++      strip_side_effects(gs);
++   strip_side_effects(rast);
++
++   /* poly's bookkeeping lives in shader temporaries: make them SSA as the
++    * rest of RADV expects. */
++   nir_shader *const lowered[] = {count, pre_gs, gs, rast};
++   for (unsigned i = 0; i < ARRAY_SIZE(lowered); i++) {
++      if (!lowered[i])
++         continue;
++      NIR_PASS(_, lowered[i], nir_lower_global_vars_to_local);
++      NIR_PASS(_, lowered[i], nir_lower_vars_to_ssa);
++
++      /* poly wrote the transform feedback: none of these captures any in
++       * hardware. */
++      lowered[i]->xfb_info = NULL;
++      lowered[i]->info.has_transform_feedback_varyings = false;
++   }
++
++   /* The rasterization copy reads the vertex ID RADV lowers right after
++    * SPIR-V: poly made it after that. */
++   NIR_PASS(_, rast, nir_lower_system_values);
++
++   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs;
++   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)] = count;
++   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)] = pre_gs;
++   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)] = gs;
++
++   /* The pipeline's hardware vertex shader is the rasterization copy; there is
++    * no hardware geometry shader. */
++   vs_stage->nir = rast;
++   vs_stage->next_stage = MESA_SHADER_FRAGMENT;
++   gs_stage->nir = NULL;
++   gs_stage->stage = MESA_SHADER_NONE;
++}
++
++static nir_def *
++load_draw(nir_builder *b, const struct radv_compiler_info *compiler_info, const struct radv_shader_args *args,
++          unsigned offset, unsigned num_components)
++{
++   nir_def *base = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &args->ac, args->gs_compute_draw),
++                                         nir_imm_int(b, compiler_info->hw.address32_hi));
++   return ac_nir_load_smem(b, num_components, base, nir_imm_int(b, offset), 4, ACCESS_CAN_SPECULATE);
++}
++
++static nir_def *
++load_draw64(nir_builder *b, const struct radv_compiler_info *compiler_info, const struct radv_shader_args *args,
++            unsigned offset)
++{
++   return nir_pack_64_2x32(b, load_draw(b, compiler_info, args, offset, 2));
++}
++
++struct lower_sysvals_state {
++   const struct radv_compiler_info *compiler_info;
++   const struct radv_shader_stage *stage;
++};
++
++/* The vertex shader run as compute: its vertex is the index-buffer entry at its
++ * place in the stream, or that place itself without an index buffer. */
++static nir_def *
++sw_vs_vertex(nir_builder *b)
++{
++   nir_def *place = nir_channel(b, nir_load_global_invocation_id(b, 32), 0);
++   nir_def *index_size = nir_load_index_size_poly(b);
++   nir_def *indexed;
++   nir_push_if(b, nir_ine_imm(b, index_size, 0));
++   {
++      indexed = poly_load_index_buffer(b, nir_load_vertex_param_buffer_poly(b), place, index_size);
++   }
++   nir_pop_if(b, NULL);
++   return nir_if_phi(b, indexed, place);
++}
++
++static bool
++lower_sw_vs_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   b->cursor = nir_before_instr(&intr->instr);
++
++   switch (intr->intrinsic) {
++   case nir_intrinsic_load_vertex_id_zero_base:
++      nir_def_replace(&intr->def, sw_vs_vertex(b));
++      return true;
++   case nir_intrinsic_load_vertex_id:
++      nir_def_replace(&intr->def, nir_iadd(b, sw_vs_vertex(b), nir_load_first_vertex(b)));
++      return true;
++   case nir_intrinsic_load_instance_id:
++      nir_def_replace(&intr->def, nir_channel(b, nir_load_global_invocation_id(b, 32), 1));
++      return true;
++   case nir_intrinsic_load_is_indexed_draw:
++      nir_def_replace(&intr->def, nir_b2i32(b, nir_ine_imm(b, nir_load_index_size_poly(b), 0)));
++      return true;
++   case nir_intrinsic_load_base_vertex:
++      nir_def_replace(&intr->def, nir_bcsel(b, nir_ine_imm(b, nir_load_index_size_poly(b), 0),
++                                            nir_load_first_vertex(b), nir_imm_int(b, 0)));
++      return true;
++   default:
++      return false;
++   }
++}
++
++static bool
++lower_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   const struct lower_sysvals_state *state = data;
++   const struct radv_compiler_info *compiler_info = state->compiler_info;
++   const struct radv_shader_args *args = &state->stage->args;
++   const bool compute = state->stage->stage == MESA_SHADER_COMPUTE;
++
++   b->cursor = nir_before_instr(&intr->instr);
++
++   nir_def *value;
++   switch (intr->intrinsic) {
++   case nir_intrinsic_load_vertex_param_buffer_poly:
++      value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(vertex_params));
++      break;
++   case nir_intrinsic_load_geometry_param_buffer_poly:
++      value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(geometry_params));
++      break;
++   case nir_intrinsic_load_ro_sink_address_poly:
++   case nir_intrinsic_load_stat_query_address_poly:
++      /* Statistics come with queries (not yet): into the sink meanwhile. */
++      value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(ro_sink));
++      break;
++   case nir_intrinsic_load_flat_mask:
++      value = load_draw64(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(flat_mask));
++      break;
++   case nir_intrinsic_load_input_topology_poly:
++      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(input_topology), 1);
++      break;
++   case nir_intrinsic_load_rasterization_stream:
++      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(rasterization_stream), 1);
++      break;
++   case nir_intrinsic_load_provoking_last:
++      value = nir_b2b32(b, nir_ine_imm(b, load_draw(b, compiler_info, args,
++                                                     RADV_GS_COMPUTE_DRAW_OFFSET(provoking_last), 1), 0));
++      break;
++   case nir_intrinsic_ro_to_rw_poly:
++      value = intr->src[0].ssa;
++      break;
++   case nir_intrinsic_load_first_vertex:
++      if (!compute)
++         return false;
++      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(first_vertex), 1);
++      break;
++   case nir_intrinsic_load_base_instance:
++      if (!compute)
++         return false;
++      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(base_instance), 1);
++      break;
++   case nir_intrinsic_load_draw_id:
++      if (!compute)
++         return false;
++      value = load_draw(b, compiler_info, args, RADV_GS_COMPUTE_DRAW_OFFSET(draw_id), 1);
++      break;
++   default:
++      return false;
++   }
++
++   nir_def_replace(&intr->def, value);
++   return true;
++}
++
++bool
++radv_gs_compute_lower_sysvals(nir_shader *nir, const struct radv_compiler_info *compiler_info,
++                              const struct radv_shader_stage *stage)
++{
++   bool progress = false;
++   NIR_PASS(progress, nir, poly_nir_lower_sysvals);
++   const struct lower_sysvals_state state = {.compiler_info = compiler_info, .stage = stage};
++   NIR_PASS(progress, nir, nir_shader_intrinsics_pass, lower_sysval, nir_metadata_control_flow, (void *)&state);
++   return progress;
++}
++
++/* Only invocations inside poly's grid run: (vertices, instances) for the
++ * vertex shader, (primitives, instances) for the geometry shader's passes,
++ * from the parameter blocks. A dispatch covers whole workgroups; the rest of
++ * the last one must write nothing. */
++static void
++guard_grid(nir_shader *nir, enum radv_gs_compute_kind kind)
++{
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   nir_cf_list body;
++   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
++
++   nir_builder b = nir_builder_at(nir_before_impl(impl));
++   nir_def *params;
++   unsigned grid_offset;
++   if (kind == RADV_GS_COMPUTE_VS) {
++      params = nir_load_vertex_param_buffer_poly(&b);
++      grid_offset = offsetof(struct poly_vertex_params, grid);
++   } else {
++      params = nir_load_geometry_param_buffer_poly(&b);
++      grid_offset = offsetof(struct poly_geometry_params, grid);
++   }
++   nir_def *grid = nir_load_global_constant(&b, 2, 32, nir_iadd_imm(&b, params, grid_offset), .align_mul = 4);
++   nir_def *id = nir_load_global_invocation_id(&b, 32);
++   nir_def *inside = nir_iand(&b, nir_ult(&b, nir_channel(&b, id, 0), nir_channel(&b, grid, 0)),
++                              nir_ult(&b, nir_channel(&b, id, 1), nir_channel(&b, grid, 1)));
++   nir_push_if(&b, inside);
++   nir_cf_reinsert(&body, b.cursor);
++   nir_pop_if(&b, NULL);
++   nir_progress(true, impl, nir_metadata_none);
++}
++
++/* As RADV's compute shaders, and poly's OpenCL helpers' global IDs without a
++ * base (a dispatch here starts at 0). */
++static const nir_lower_compute_system_values_options compute_sysval_options = {
++   .lower_local_invocation_index = true,
++   .has_base_global_invocation_id = false,
++   .has_base_workgroup_id = false,
++};
++
++struct radv_shader_binary *
++radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const struct radv_graphics_state_key *gfx_state,
++                        const struct radv_shader_stage *vs_stage, enum radv_gs_compute_kind kind, nir_shader *nir,
++                        struct radv_shader_debug_info *debug)
++{
++   struct radv_shader_stage stage;
++   memset(&stage, 0, sizeof(stage));
++   stage.stage = MESA_SHADER_COMPUTE;
++   stage.next_stage = MESA_SHADER_NONE;
++   stage.entrypoint = "main";
++   stage.layout = vs_stage->layout;
++   stage.key = vs_stage->key;
++   stage.nir = nir;
++
++   /* The vertex shader's attribute fetch needs its vertex input information,
++    * gathered while it is still a vertex shader. */
++   struct radv_shader_info vs_info;
++   if (kind == RADV_GS_COMPUTE_VS) {
++      radv_nir_shader_info_init(MESA_SHADER_VERTEX, MESA_SHADER_NONE, &vs_info);
++      radv_nir_shader_info_pass(compiler_info, nir, &stage.layout, &stage.key, gfx_state, RADV_PIPELINE_GRAPHICS,
++                                false, &vs_info);
++   }
++
++   /* The pre-GS setup is one invocation; the others cover poly's grid. */
++   if (kind != RADV_GS_COMPUTE_PRE_GS)
++      guard_grid(nir, kind);
++
++   /* Everything runs as compute, 64 invocations a workgroup along x. */
++   nir->info.stage = MESA_SHADER_COMPUTE;
++   memset(&nir->info.cs, 0, sizeof(nir->info.cs));
++   nir->info.workgroup_size[0] = 64;
++   nir->info.workgroup_size[1] = 1;
++   nir->info.workgroup_size[2] = 1;
++   nir->info.workgroup_size_variable = false;
++   /* The vertex and geometry shaders keep the wave size of their own stages. */
++   nir->info.min_subgroup_size = 64;
++   nir->info.max_subgroup_size = 64;
++   NIR_PASS(_, nir, nir_lower_compute_system_values, &compute_sysval_options);
++   NIR_PASS(_, nir, nir_lower_global_vars_to_local);
++   NIR_PASS(_, nir, ac_nir_lower_indirect_derefs);
++   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
++   radv_optimize_nir(nir, stage.key.optimisations_disabled);
++   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
++
++   radv_nir_shader_info_init(MESA_SHADER_COMPUTE, MESA_SHADER_NONE, &stage.info);
++   radv_nir_shader_info_pass(compiler_info, nir, &stage.layout, &stage.key, NULL, RADV_PIPELINE_COMPUTE, false,
++                             &stage.info);
++   stage.info.gs_compute = kind;
++   if (kind == RADV_GS_COMPUTE_VS)
++      stage.info.vs = vs_info.vs;
++
++   radv_declare_shader_args(compiler_info, NULL, &stage, MESA_SHADER_NONE, debug);
++   stage.info.user_sgprs_locs = stage.args.user_sgprs_locs;
++   stage.info.inline_push_constant_mask = stage.args.ac.inline_push_const_mask;
++
++   if (kind == RADV_GS_COMPUTE_VS) {
++      NIR_PASS(_, nir, radv_nir_lower_vs_inputs, compiler_info, &stage, gfx_state);
++      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_sw_vs_sysval, nir_metadata_none, NULL);
++   }
++   radv_gs_compute_lower_sysvals(nir, compiler_info, &stage);
++   NIR_PASS(_, nir, nir_lower_compute_system_values, &compute_sysval_options);
++   radv_optimize_nir(nir, stage.key.optimisations_disabled);
++
++   radv_postprocess_nir(compiler_info, NULL, &stage);
++
++   struct radv_shader_binary *binary = radv_shader_nir_to_asm(compiler_info, &stage, &nir, 1, NULL);
++   radv_shader_dump_asm(compiler_info, debug, binary, &stage.info);
++   return binary;
++}
++
++VkResult
++radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,
++                                  VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
++{
++   static const enum radv_meta_object_key_type keys[] = {
++      [RADV_GS_COMPUTE_META_SETUP] = RADV_META_OBJECT_KEY_GS_COMPUTE_SETUP,
++      [RADV_GS_COMPUTE_META_UNROLL] = RADV_META_OBJECT_KEY_GS_COMPUTE_UNROLL,
++      [RADV_GS_COMPUTE_META_PREFIX_SUM] = RADV_META_OBJECT_KEY_GS_COMPUTE_PREFIX_SUM,
++   };
++   static const char *const names[] = {
++      [RADV_GS_COMPUTE_META_SETUP] = "meta_gs_compute_setup",
++      [RADV_GS_COMPUTE_META_UNROLL] = "meta_gs_compute_unroll",
++      [RADV_GS_COMPUTE_META_PREFIX_SUM] = "meta_gs_compute_prefix_sum",
++   };
++   const enum radv_meta_object_key_type key = keys[meta];
++   const VkPushConstantRange pc_range = {
++      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
++      .size = sizeof(uint64_t),
++   };
++
++   VkResult result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key,
++                                                 sizeof(key), layout_out);
++   if (result != VK_SUCCESS)
++      return result;
++
++   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(&device->meta_state.device, &key, sizeof(key));
++   if (pipeline_from_cache != VK_NULL_HANDLE) {
++      *pipeline_out = pipeline_from_cache;
++      return VK_SUCCESS;
++   }
++
++   /* One invocation sets a draw up; the unroll and each word's prefix sum are
++    * one wave (their ballots and scans see the whole workgroup). The push
++    * constant is the address of the argument block, or of the geometry
++    * parameters for the prefix sum. */
++   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "%s", names[meta]);
++   b.shader->info.workgroup_size[0] = meta == RADV_GS_COMPUTE_META_SETUP ? 1 : RADV_GS_COMPUTE_WAVE;
++   nir_def *args = nir_pack_64_2x32(&b, nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8));
++   switch (meta) {
++   case RADV_GS_COMPUTE_META_SETUP:
++      radv_gs_compute_setup(&b, args);
++      break;
++   case RADV_GS_COMPUTE_META_UNROLL:
++      radv_gs_compute_unroll(&b, args);
++      break;
++   case RADV_GS_COMPUTE_META_PREFIX_SUM:
++      radv_gs_compute_prefix_sum(&b, args);
++      break;
++   }
++
++   const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
++      .requiredSubgroupSize = RADV_GS_COMPUTE_WAVE,
++   };
++   const VkComputePipelineCreateInfo pipeline_info = {
++      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
++      .stage =
++         {
++            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++            .pNext = &subgroup_size,
++            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
++            .module = vk_shader_module_handle_from_nir(b.shader),
++            .pName = "main",
++         },
++      .layout = *layout_out,
++   };
++
++   result = vk_meta_create_compute_pipeline(&device->vk, &device->meta_state.device, &pipeline_info, &key, sizeof(key),
++                                            pipeline_out);
++   ralloc_free(b.shader);
++   return result;
++}
+diff --git a/src/amd/vulkan/radv_gs_compute.h b/src/amd/vulkan/radv_gs_compute.h
+new file mode 100644
+index 00000000000..f397a73c946
+--- /dev/null
++++ b/src/amd/vulkan/radv_gs_compute.h
+@@ -0,0 +1,160 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef RADV_GS_COMPUTE_H
++#define RADV_GS_COMPUTE_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "poly/nir/poly_nir.h"
++#include "radv_gs_compute_abi.h"
++#include "radv_shader.h"
++#include "radv_shader_info.h"
++#include "sid.h"
++
++/* Geometry shaders the hardware cannot run, run as compute with Mesa's poly
++ * lowering (the way Asahi runs every geometry shader). On a GPU without a
++ * legacy GS (radeon_info.has_legacy_gs), NGG serves every geometry shader but
++ * transform feedback from one (NGG streamout before GFX11 orders its writes
++ * with GDS) and a tessellated one amplifying past one subgroup.
++ *
++ * Such a pipeline has no hardware GS. Per draw:
++ * - the vertex shader runs as compute over the unrolled vertex stream and
++ *   stores its outputs to memory (poly's GS reads its inputs by position in
++ *   that stream);
++ * - when the output count is not static and transform feedback or queries
++ *   need it, a count pass (which keeps the GS's memory writes) and a prefix
++ *   sum run, then the pre-GS setup;
++ * - the GS proper runs as compute (writing transform feedback and, for a
++ *   dynamic topology, the index buffer to rasterize);
++ * - the pipeline's hardware vertex shader is poly's rasterization shader, a
++ *   copy of the GS that shades one output vertex per invocation, drawn with
++ *   the GS output topology.
++ *
++ * Every one of those shaders reads one per-draw block, struct
++ * radv_gs_compute_draw, through a user SGPR.
++ */
++
++struct radv_compiler_info;
++struct radv_device;
++struct radv_graphics_state_key;
++struct radv_shader_stage;
++struct radv_shader_binary;
++struct radv_shader_debug_info;
++
++#define RADV_GS_COMPUTE_DRAW_OFFSET(field) ((unsigned)offsetof(struct radv_gs_compute_draw, field))
++
++/* enum radv_gs_compute_kind is radv_shader_info.h's. */
++#define RADV_GS_COMPUTE_SHADERS 4 /* VS, COUNT, PRE_GS, MAIN */
++
++static inline unsigned
++radv_gs_compute_index(enum radv_gs_compute_kind kind)
++{
++   return kind - RADV_GS_COMPUTE_VS;
++}
++
++struct radv_gs_compute_nir {
++   nir_shader *nir[RADV_GS_COMPUTE_SHADERS];
++   struct poly_gs_info info;
++   /* The vertex shader's outputs: the layout of what it stores. */
++   uint64_t vs_outputs;
++};
++
++/* What a pipeline compile hands back (radv_graphics_shaders_compile). */
++struct radv_gs_compute_binaries {
++   bool used;
++   struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
++   struct radv_shader_debug_info debug[RADV_GS_COMPUTE_SHADERS];
++   struct poly_gs_info info;
++   uint64_t vs_outputs;
++};
++
++/* What a pipeline keeps (radv_pipeline.gs_compute). */
++struct radv_gs_compute_pipeline {
++   struct radv_shader *shaders[RADV_GS_COMPUTE_SHADERS];
++   struct poly_gs_info info;
++   uint64_t vs_outputs;
++};
++
++/* The draw's topology as poly names it, from RADV's dynamic state (which
++ * holds the hardware encoding, V_008958_DI_PT_*). */
++static inline enum mesa_prim
++radv_gs_compute_input_prim(unsigned di_pt)
++{
++   switch (di_pt) {
++   case V_008958_DI_PT_POINTLIST:
++      return MESA_PRIM_POINTS;
++   case V_008958_DI_PT_LINELIST:
++      return MESA_PRIM_LINES;
++   case V_008958_DI_PT_LINESTRIP:
++      return MESA_PRIM_LINE_STRIP;
++   case V_008958_DI_PT_TRILIST:
++      return MESA_PRIM_TRIANGLES;
++   case V_008958_DI_PT_TRISTRIP:
++      return MESA_PRIM_TRIANGLE_STRIP;
++   case V_008958_DI_PT_TRIFAN:
++      return MESA_PRIM_TRIANGLE_FAN;
++   case V_008958_DI_PT_LINELIST_ADJ:
++      return MESA_PRIM_LINES_ADJACENCY;
++   case V_008958_DI_PT_LINESTRIP_ADJ:
++      return MESA_PRIM_LINE_STRIP_ADJACENCY;
++   case V_008958_DI_PT_TRILIST_ADJ:
++      return MESA_PRIM_TRIANGLES_ADJACENCY;
++   case V_008958_DI_PT_TRISTRIP_ADJ:
++      return MESA_PRIM_TRIANGLE_STRIP_ADJACENCY;
++   default:
++      return MESA_PRIM_PATCHES;
++   }
++}
++
++/* The hardware topology the rasterization copy draws for poly's output mode. */
++static inline unsigned
++radv_gs_compute_rast_topology(enum mesa_prim mode)
++{
++   switch (mode) {
++   case MESA_PRIM_POINTS:
++      return V_008958_DI_PT_POINTLIST;
++   case MESA_PRIM_LINE_STRIP:
++      return V_008958_DI_PT_LINESTRIP;
++   default:
++      return V_008958_DI_PT_TRISTRIP;
++   }
++}
++
++bool radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info,
++                            const struct radv_graphics_state_key *gfx_state, const struct radv_shader_stage *stages);
++
++void radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
++                           struct radv_gs_compute_nir *out);
++
++/* Replaces the system values a geometry shader run as compute reads (poly's,
++ * the draw's) with loads from the draw block; the stage's arguments must be
++ * declared. */
++bool radv_gs_compute_lower_sysvals(nir_shader *nir, const struct radv_compiler_info *compiler_info,
++                                   const struct radv_shader_stage *stage);
++
++struct radv_shader_binary *radv_gs_compute_compile(const struct radv_compiler_info *compiler_info,
++                                                   const struct radv_graphics_state_key *gfx_state,
++                                                   const struct radv_shader_stage *vs_stage,
++                                                   enum radv_gs_compute_kind kind, nir_shader *nir,
++                                                   struct radv_shader_debug_info *debug);
++
++/* The meta compute passes of a draw (cl/radv_gs_compute.cl): setting up one
++ * whose counts live in memory, unrolling its primitive restarts, and the
++ * prefix sum of its counts for transform feedback. Each one's push constant
++ * is the address of its argument block, or of the geometry parameters. */
++enum radv_gs_compute_meta {
++   RADV_GS_COMPUTE_META_SETUP,
++   RADV_GS_COMPUTE_META_UNROLL,
++   RADV_GS_COMPUTE_META_PREFIX_SUM,
++};
++
++VkResult radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,
++                                           VkPipeline *pipeline, VkPipelineLayout *layout);
++
++#endif /* RADV_GS_COMPUTE_H */
+diff --git a/src/amd/vulkan/radv_gs_compute_abi.h b/src/amd/vulkan/radv_gs_compute_abi.h
+new file mode 100644
+index 00000000000..ee30fcb8f94
+--- /dev/null
++++ b/src/amd/vulkan/radv_gs_compute_abi.h
+@@ -0,0 +1,77 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++/* What the driver and its OpenCL functions for geometry shaders run as
++ * compute share (radv_gs_compute.h, cl/radv_gs_compute.cl). */
++
++#pragma once
++
++#include "compiler/libcl/libcl.h"
++#include "poly/geometry.h"
++
++/* The per-draw block every such shader reads through a user SGPR. */
++struct radv_gs_compute_draw {
++   DEVICE(struct poly_vertex_params) vertex_params;
++   DEVICE(struct poly_geometry_params) geometry_params;
++   uint64_t ro_sink;        /* where writes that must go nowhere go */
++   uint64_t flat_mask;      /* the fragment shader's flat inputs */
++   uint32_t input_topology; /* enum mesa_prim of the draw */
++   uint32_t provoking_last;
++   uint32_t first_vertex;
++   uint32_t base_instance;
++   uint32_t draw_id;
++   uint32_t rasterization_stream;
++} PACKED;
++static_assert(sizeof(struct radv_gs_compute_draw) == 14 * 4, "struct radv_gs_compute_draw must be 14 words");
++
++/* A draw whose counts live in memory (indirect, byte count, or unrolled for
++ * primitive restart) is set up by one invocation of radv_gs_compute_setup:
++ * it sizes the passes, allocates their buffers from the command buffer's
++ * heap and writes the workgroup counts of the dispatches that follow. When
++ * the heap is full the draw draws nothing. */
++struct radv_gs_compute_setup {
++   DEVICE(uint32_t) draw;       /* VkDraw[Indexed]IndirectCommand */
++   DEVICE(uint32_t) draw_count; /* the count of an indirect count draw, or 0 */
++   DEVICE(uint32_t) byte_count; /* the counter of a byte count draw, or 0 */
++   DEVICE(struct radv_gs_compute_draw) block;
++   DEVICE(struct poly_heap) heap;
++   uint64_t index_buffer;
++   uint64_t vs_outputs;
++   uint32_t index_buffer_range_el;
++   uint32_t index_size_B; /* 0 when not indexed */
++   uint32_t draw_index;
++   uint32_t byte_offset;
++   uint32_t byte_stride;
++   uint32_t prim; /* enum mesa_prim */
++   uint32_t shape;
++   uint32_t max_indices;
++
++   /* Written: workgroup counts of the vertex and geometry passes. */
++   uint32_t vs_groups[3];
++   uint32_t gs_groups[3];
++} PACKED;
++static_assert(sizeof(struct radv_gs_compute_setup) == 28 * 4, "struct radv_gs_compute_setup must be 28 words");
++
++/* An indexed draw with primitive restart becomes an indexed draw of the
++ * decomposed list topology without restarts, in the heap
++ * (radv_gs_compute_unroll, one workgroup of one wave). */
++struct radv_gs_compute_unroll {
++   DEVICE(uint32_t) draw;       /* VkDrawIndexedIndirectCommand */
++   DEVICE(uint32_t) draw_count; /* the count of an indirect count draw, or 0 */
++   DEVICE(uint32_t) out_draw;   /* the unrolled VkDrawIndexedIndirectCommand */
++   DEVICE(struct poly_heap) heap;
++   uint64_t index_buffer;
++   uint64_t ro_sink;
++   uint32_t index_buffer_range_el;
++   uint32_t index_size_B;
++   uint32_t restart_index;
++   uint32_t flatshade_first;
++   uint32_t prim; /* enum mesa_prim, before decomposition */
++   uint32_t draw_index;
++} PACKED;
++static_assert(sizeof(struct radv_gs_compute_unroll) == 18 * 4, "struct radv_gs_compute_unroll must be 18 words");
++
++#define RADV_GS_COMPUTE_WAVE 64
+diff --git a/src/amd/vulkan/radv_pipeline.h b/src/amd/vulkan/radv_pipeline.h
+index 50832e7ba87..68f01074fef 100644
+--- a/src/amd/vulkan/radv_pipeline.h
++++ b/src/amd/vulkan/radv_pipeline.h
+@@ -36,6 +36,8 @@ enum radv_pipeline_type {
+    RADV_PIPELINE_TYPE_COUNT,
+ };
+ 
++struct radv_gs_compute_pipeline;
++
+ struct radv_pipeline {
+    struct vk_object_base base;
+    uint8_t blake3[BLAKE3_KEY_LEN];
+@@ -50,6 +52,8 @@ struct radv_pipeline {
+    bool need_push_constants_upload;
+    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
+    struct radv_shader *gs_copy_shader;
++   /* A geometry shader run as compute (radv_gs_compute.h), or NULL. */
++   struct radv_gs_compute_pipeline *gs_compute;
+ 
+    /* Unique pipeline hash identifier. */
+    uint64_t pipeline_hash;
+diff --git a/src/amd/vulkan/radv_pipeline_graphics.c b/src/amd/vulkan/radv_pipeline_graphics.c
+index 683721ff837..9e4f7882d37 100644
+--- a/src/amd/vulkan/radv_pipeline_graphics.c
++++ b/src/amd/vulkan/radv_pipeline_graphics.c
+@@ -13,6 +13,7 @@
+ #include "nir/nir_serialize.h"
+ #include "nir/nir_xfb_info.h"
+ #include "nir/radv_nir.h"
++#include "radv_gs_compute.h"
+ #include "tools/radv_rmv.h"
+ #include "util/mesa-blake3.h"
+ #include "util/os_time.h"
+@@ -588,8 +589,11 @@ radv_graphics_pipeline_import_lib(const struct radv_device *device, struct radv_
+    pipeline->dynamic_states |= lib->base.dynamic_states;
+    pipeline->active_stages |= lib->base.active_stages;
+ 
+-   /* Import binaries when LTO is disabled and when the library doesn't retain any shaders. */
+-   if (!import_pipeline_binaries &&
++   /* Import binaries when LTO is disabled and when the library doesn't retain any shaders. A
++    * library whose geometry shader runs as compute once linked is compiled again instead
++    * (radv_pipeline_load_retained_shaders).
++    */
++   if (!import_pipeline_binaries && !lib->gs_compute_link &&
+        (lib->base.has_pipeline_binaries || radv_should_import_lib_binaries(pipeline->base.create_flags))) {
+       import_binaries = true;
+    }
+@@ -2302,14 +2306,16 @@ radv_pipeline_load_retained_shaders(const struct radv_device *device, const VkGr
+    if (!libs_info)
+       return;
+ 
+-   /* Nothing to load if fast-linking is enabled and if there is no retained shaders. */
+-   if (radv_should_import_lib_binaries(create_flags))
+-      return;
+-
+    for (uint32_t i = 0; i < libs_info->libraryCount; i++) {
+       VK_FROM_HANDLE(radv_pipeline, pipeline_lib, libs_info->pLibraries[i]);
+       struct radv_graphics_lib_pipeline *gfx_pipeline_lib = radv_pipeline_to_graphics_lib(pipeline_lib);
+ 
++      /* Nothing to load if fast-linking is enabled and if there is no retained shaders, but a
++       * geometry shader that runs as compute once linked is compiled here with the whole state.
++       */
++      if (radv_should_import_lib_binaries(create_flags) && !gfx_pipeline_lib->gs_compute_link)
++         continue;
++
+       radv_pipeline_import_retained_shaders(device, gfx_pipeline_lib, stages);
+    }
+ }
+@@ -2420,6 +2426,10 @@ radv_skip_graphics_pipeline_compile(const struct radv_device *device, const VkGr
+ 
+          assert(pipeline_lib->type == RADV_PIPELINE_GRAPHICS_LIB);
+ 
++         /* Its geometry shader runs as compute, compiled with the whole state. */
++         if (gfx_pipeline_lib->gs_compute_link)
++            return false;
++
+          active_stages |= gfx_pipeline_lib->base.active_stages;
+ 
+          for (uint32_t s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
+@@ -2455,7 +2465,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+                               struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
+                               bool is_internal, struct radv_retained_shaders *retained_shaders, bool noop_fs,
+                               struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
+-                              struct radv_shader_debug_info *gs_copy_debug, struct radv_shader_binary **gs_copy_binary)
++                              struct radv_shader_debug_info *gs_copy_debug, struct radv_shader_binary **gs_copy_binary,
++                              struct radv_gs_compute_binaries *gs_compute)
+ {
+    const bool nir_cache = compiler_info->enable_nir_cache;
+ 
+@@ -2491,6 +2502,21 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+       radv_pipeline_retain_shaders(retained_shaders, stages);
+    }
+ 
++   /* A geometry shader NGG cannot run goes through compute (radv_gs_compute.h):
++    * the pipeline's hardware vertex shader becomes poly's rasterization copy,
++    * drawing the geometry shader's output topology. */
++   const struct radv_graphics_state_key *api_gfx_state = gfx_state;
++   struct radv_graphics_state_key gs_compute_gfx_state;
++   struct radv_gs_compute_nir gs_compute_nir;
++   const bool gs_compute_used = gs_compute && radv_gs_compute_wanted(compiler_info, gfx_state, stages);
++   if (gs_compute_used) {
++      radv_gs_compute_split(compiler_info, stages, &gs_compute_nir);
++      gs_compute_gfx_state = *gfx_state;
++      gs_compute_gfx_state.ia.topology = radv_gs_compute_rast_topology(gs_compute_nir.info.mode);
++      gs_compute_gfx_state.vs.has_prolog = false;
++      gfx_state = &gs_compute_gfx_state;
++   }
++
+    VkShaderStageFlagBits active_nir_stages = 0;
+    for (int i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+       if (stages[i].nir)
+@@ -2732,6 +2758,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+ 
+    radv_fill_shader_info(compiler_info, RADV_PIPELINE_GRAPHICS, gfx_state, stages, active_nir_stages);
+ 
++   if (gs_compute_used)
++      stages[MESA_SHADER_VERTEX].info.gs_compute = RADV_GS_COMPUTE_RAST;
++
+    /* Remove the primitive shading rate output if VRS flat shading overrides it. */
+    radv_foreach_stage (i, active_nir_stages) {
+       if (!radv_is_last_vgt_stage(&stages[i]))
+@@ -2759,6 +2788,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+ 
+    radv_declare_pipeline_args(compiler_info, stages, gfx_state, active_nir_stages, debug);
+ 
++   if (gs_compute_used)
++      radv_gs_compute_lower_sysvals(stages[MESA_SHADER_VERTEX].nir, compiler_info, &stages[MESA_SHADER_VERTEX]);
++
+    radv_foreach_stage (i, active_nir_stages) {
+       int64_t stage_start = os_time_get_nano();
+ 
+@@ -2785,6 +2817,22 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+    /* Compile NIR shaders to AMD assembly. */
+    radv_graphics_shaders_nir_to_asm(compiler_info, cache, stages, gfx_state, active_nir_stages, debug, binaries,
+                                     gs_copy_debug, gs_copy_binary);
++
++   if (gs_compute_used) {
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++         if (!gs_compute_nir.nir[i])
++            continue;
++         const enum radv_gs_compute_kind kind = RADV_GS_COMPUTE_VS + i;
++         const struct radv_shader_stage *api_stage =
++            &stages[kind == RADV_GS_COMPUTE_VS ? MESA_SHADER_VERTEX : MESA_SHADER_GEOMETRY];
++         gs_compute->binaries[i] = radv_gs_compute_compile(compiler_info, api_gfx_state, api_stage, kind,
++                                                           gs_compute_nir.nir[i], &gs_compute->debug[i]);
++         ralloc_free(gs_compute_nir.nir[i]);
++      }
++      gs_compute->info = gs_compute_nir.info;
++      gs_compute->vs_outputs = gs_compute_nir.vs_outputs;
++      gs_compute->used = true;
++   }
+ }
+ 
+ void
+@@ -2959,8 +3007,14 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
+       .flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT,
+    };
+    VkResult result = VK_SUCCESS;
+-   const bool retain_shaders =
++   const bool app_retains_shaders =
+       !!(pipeline->base.create_flags & VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT);
++   /* A library's geometry shader may have to be compiled again as compute
++    * once linked (radv_graphics_lib_pipeline.gs_compute_link): keep it. */
++   const bool retain_shaders =
++      app_retains_shaders ||
++      ((pipeline->base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) && compiler_info->key.no_legacy_gs &&
++       stages[MESA_SHADER_GEOMETRY].stage != MESA_SHADER_NONE);
+    struct radv_retained_shaders *retained_shaders = NULL;
+ 
+    int64_t pipeline_start = os_time_get_nano();
+@@ -2978,7 +3032,7 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
+     */
+    if (fast_linking_enabled) {
+       skip_shaders_cache = true;
+-   } else if (retain_shaders) {
++   } else if (app_retains_shaders) {
+       assert(pipeline->base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR);
+       for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+          if (stages[i].stage != MESA_SHADER_NONE && !stages[i].spirv.size) {
+@@ -3030,11 +3084,32 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
+ 
+    struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
+    struct radv_shader_debug_info gs_copy_debug = {0};
++   struct radv_gs_compute_binaries gs_compute = {0};
+    radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
+-                                 retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
++                                 retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary,
++                                 &gs_compute);
+    radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
+                                 &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
+ 
++   if (gs_compute.used) {
++      /* Its compute shaders are not in the shaders cache: the pipeline is not
++       * either. */
++      skip_shaders_cache = true;
++      pipeline->base.gs_compute = calloc(1, sizeof(*pipeline->base.gs_compute));
++      if (!pipeline->base.gs_compute)
++         result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++         if (gs_compute.binaries[i] && pipeline->base.gs_compute)
++            pipeline->base.gs_compute->shaders[i] =
++               radv_shader_create(device, cache, gs_compute.binaries[i], true, &gs_compute.debug[i]);
++         free(gs_compute.binaries[i]);
++      }
++      if (pipeline->base.gs_compute) {
++         pipeline->base.gs_compute->info = gs_compute.info;
++         pipeline->base.gs_compute->vs_outputs = gs_compute.vs_outputs;
++      }
++   }
++
+    if (!skip_shaders_cache) {
+       radv_pipeline_cache_insert(device, cache, &pipeline->base);
+    }
+@@ -3354,6 +3429,30 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
+ 
+    if (pipeline->base.gs_copy_shader)
+       radv_shader_unref(device, pipeline->base.gs_copy_shader);
++
++   if (pipeline->base.gs_compute) {
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++         if (pipeline->base.gs_compute->shaders[i])
++            radv_shader_unref(device, pipeline->base.gs_compute->shaders[i]);
++      }
++      free(pipeline->base.gs_compute);
++   }
++}
++
++/* Whether the library kept its geometry shader: as NIR, or as SPIR-V after a
++ * shaders cache hit (not as a module identifier alone). */
++static bool
++radv_graphics_lib_can_recompile_gs(const struct radv_graphics_lib_pipeline *lib)
++{
++   if (lib->retained_shaders.stages[MESA_SHADER_GEOMETRY].serialized_nir_size)
++      return true;
++
++   for (uint32_t i = 0; i < lib->stage_count; i++) {
++      const VkPipelineShaderStageCreateInfo *sinfo = &lib->stages[i];
++      if (sinfo->stage == VK_SHADER_STAGE_GEOMETRY_BIT)
++         return sinfo->module != VK_NULL_HANDLE || vk_find_struct_const(sinfo->pNext, SHADER_MODULE_CREATE_INFO);
++   }
++   return false;
+ }
+ 
+ static VkResult
+@@ -3421,6 +3520,15 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
+       radv_graphics_pipeline_state_finish(device, &gfx_state);
+    }
+ 
++   /* A geometry shader capturing transform feedback runs as compute, which
++    * needs state a library may not have (radv_gs_compute_wanted): pipelines
++    * built from the library compile it again, from what it retained. */
++   const struct radv_shader *gs = pipeline->base.base.shaders[MESA_SHADER_GEOMETRY];
++   pipeline->gs_compute_link =
++      result == VK_SUCCESS && device->compiler_info.key.no_legacy_gs && radv_graphics_lib_can_recompile_gs(pipeline) &&
++      (pipeline->base.base.gs_compute ||
++       (gs && (gs->info.so.enabled_stream_buffers_mask || debug_get_bool_option("RADV_PS5_GS_COMPUTE", false))));
++
+    return result;
+ }
+ 
+diff --git a/src/amd/vulkan/radv_pipeline_graphics.h b/src/amd/vulkan/radv_pipeline_graphics.h
+index 4e63e6276e7..36ef2f41363 100644
+--- a/src/amd/vulkan/radv_pipeline_graphics.h
++++ b/src/amd/vulkan/radv_pipeline_graphics.h
+@@ -181,6 +181,11 @@ struct radv_graphics_lib_pipeline {
+ 
+    struct radv_retained_shaders retained_shaders;
+ 
++   /* Its geometry shader runs as compute (radv_gs_compute.h) once the state
++    * it lacks is known: pipelines built from it compile it again with that
++    * state instead of fast-linking it. */
++   bool gs_compute_link;
++
+    void *mem_ctx;
+ 
+    unsigned stage_count;
+@@ -641,12 +646,15 @@ struct radv_ps_epilog_state {
+ struct radv_ps_epilog_key radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info,
+                                                       const struct radv_ps_epilog_state *state);
+ 
++struct radv_gs_compute_binaries;
++
+ void radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
+                                    struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
+                                    bool is_internal, struct radv_retained_shaders *retained_shaders, bool noop_fs,
+                                    struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
+                                    struct radv_shader_debug_info *gs_copy_debug,
+-                                   struct radv_shader_binary **gs_copy_binary);
++                                   struct radv_shader_binary **gs_copy_binary,
++                                   struct radv_gs_compute_binaries *gs_compute);
+ 
+ void radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cache *cache, bool skip_shaders_cache,
+                                   struct radv_shader **shaders, struct radv_shader_binary **binaries,
+diff --git a/src/amd/vulkan/radv_query.c b/src/amd/vulkan/radv_query.c
+index bf1ca5b495b..b75ab82f6ca 100644
+--- a/src/amd/vulkan/radv_query.c
++++ b/src/amd/vulkan/radv_query.c
+@@ -33,7 +33,7 @@
+ static void radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type,
+                               struct radeon_winsys_bo *src_bo, uint64_t src_offset, uint64_t dst_va,
+                               uint32_t src_stride, uint32_t dst_stride, uint32_t count, uint32_t flags,
+-                              uint32_t pipeline_stats_mask, uint32_t avail_offset, bool uses_emulated_queries);
++                              uint32_t pipeline_stats_mask, uint32_t avail_offset, uint32_t query_flags);
+ 
+ static void
+ gfx10_copy_shader_query(struct radv_cmd_stream *cs, uint32_t src_sel, uint64_t src_va, uint64_t dst_va)
+@@ -67,6 +67,50 @@ gfx10_copy_shader_query_gfx(struct radv_cmd_buffer *cmd_buffer, bool use_gds, ui
+    gfx10_copy_shader_query(cmd_buffer->cs, src_sel, src_va, dst_va);
+ }
+ 
++/* Geometry shaders run as compute count what they generate and write in
++ * memory (radv_gs_compute_query_counters). The query types those counts
++ * belong to sample them after the hardware's: transform feedback queries
++ * {generated, written} at the beginning then at the end, primitives
++ * generated queries generated at the beginning then at the end, each a
++ * 32-bit count with the availability bit above it. */
++#define RADV_QUERY_GS_COMPUTE_TFB_OFFSET 32
++#define RADV_QUERY_GS_COMPUTE_TFB_STRIDE 64
++#define RADV_QUERY_GS_COMPUTE_PGQ_OFFSET 48
++#define RADV_QUERY_GS_COMPUTE_PGQ_STRIDE 64
++
++/* Bits of the copy shaders' last push constant. */
++#define RADV_QUERY_FLAG_EMULATED   (1u << 0)
++#define RADV_QUERY_FLAG_GS_COMPUTE (1u << 1)
++
++static bool
++radv_query_counts_gs_compute(const struct radv_physical_device *pdev)
++{
++#ifdef RADV_GS_COMPUTE
++   return !pdev->info.has_legacy_gs && pdev->info.gfx_level < GFX11;
++#else
++   return false;
++#endif
++}
++
++static void
++radv_copy_gs_compute_count(struct radv_cmd_buffer *cmd_buffer, uint32_t counter_offset, uint64_t dst_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++   const uint64_t counters = radv_gs_compute_query_counters(cmd_buffer);
++
++   /* After the passes that count, through L2. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_L2;
++   radv_emit_cache_flush(cmd_buffer);
++
++   radeon_check_space(device->ws, cs->b, 12);
++   if (counters)
++      gfx10_copy_shader_query(cs, COPY_DATA_SRC_MEM, counters + counter_offset, dst_va);
++   else
++      ac_emit_cp_write_data_imm(cs->b, V_371_MICRO_ENGINE, dst_va, 0);
++   ac_emit_cp_write_data_imm(cs->b, V_371_MICRO_ENGINE, dst_va + 4, 0x80000000);
++}
++
+ static void
+ gfx10_copy_shader_query_ace(struct radv_cmd_buffer *cmd_buffer, uint32_t src_offset, uint64_t dst_va)
+ {
+@@ -864,8 +908,13 @@ build_tfb_query_shader()
+    /* Compute global ID. */
+    nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
+ 
++   /* Whether geometry shaders run as compute counted too. */
++   nir_def *query_flags = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 32), .range = 36);
++   nir_def *gs_compute = nir_test_mask(&b, query_flags, RADV_QUERY_FLAG_GS_COMPUTE);
++
+    /* Compute src/dst strides. */
+-   nir_def *input_stride = nir_imm_int(&b, 32);
++   nir_def *input_stride = nir_bcsel(&b, gs_compute, nir_imm_int(&b, RADV_QUERY_GS_COMPUTE_TFB_STRIDE),
++                                     nir_imm_int(&b, 32));
+    nir_def *input_base = nir_imul(&b, input_stride, global_id);
+    nir_def *output_stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 20), .range = 24);
+    nir_def *output_base = nir_imul(&b, output_stride, global_id);
+@@ -875,11 +924,38 @@ build_tfb_query_shader()
+    nir_def *load2 = nir_load_global(&b, 4, 32, nir_iadd(&b, src_va, nir_u2u64(&b, nir_iadd_imm(&b, input_base, 16))),
+                                     .align_mul = 16);
+ 
++   /* The memory counts, {generated, written} at the beginning and the end,
++    * or zeroes that are available. */
++   nir_variable *gsc_counts = nir_local_variable_create(b.impl, glsl_vector_type(GLSL_TYPE_UINT, 4), "gsc_counts");
++   nir_variable *gsc_avail = nir_local_variable_create(b.impl, glsl_uint_type(), "gsc_avail");
++   nir_store_var(&b, gsc_counts, nir_imm_zero(&b, 4, 32), 0xf);
++   nir_store_var(&b, gsc_avail, nir_imm_int(&b, 0x80000000), 0x1);
++   nir_push_if(&b, gs_compute);
++   {
++      nir_def *begin = nir_load_global(
++         &b, 4, 32, nir_iadd(&b, src_va, nir_u2u64(&b, nir_iadd_imm(&b, input_base, RADV_QUERY_GS_COMPUTE_TFB_OFFSET))),
++         .align_mul = 16);
++      nir_def *end = nir_load_global(
++         &b, 4, 32,
++         nir_iadd(&b, src_va, nir_u2u64(&b, nir_iadd_imm(&b, input_base, RADV_QUERY_GS_COMPUTE_TFB_OFFSET + 16))),
++         .align_mul = 16);
++      nir_store_var(&b, gsc_counts,
++                    nir_vec4(&b, nir_channel(&b, begin, 0), nir_channel(&b, begin, 2), nir_channel(&b, end, 0),
++                             nir_channel(&b, end, 2)),
++                    0xf);
++      nir_store_var(&b, gsc_avail,
++                    nir_iand(&b, nir_iand(&b, nir_channel(&b, begin, 1), nir_channel(&b, begin, 3)),
++                             nir_iand(&b, nir_channel(&b, end, 1), nir_channel(&b, end, 3))),
++                    0x1);
++   }
++   nir_pop_if(&b, NULL);
++
+    /* Check if result is available. */
+    nir_def *avails[2];
+    avails[0] = nir_iand(&b, nir_channel(&b, load1, 1), nir_channel(&b, load1, 3));
+    avails[1] = nir_iand(&b, nir_channel(&b, load2, 1), nir_channel(&b, load2, 3));
+-   nir_def *result_is_available = nir_test_mask(&b, nir_iand(&b, avails[0], avails[1]), 0x80000000);
++   nir_def *result_is_available =
++      nir_test_mask(&b, nir_iand(&b, nir_iand(&b, avails[0], avails[1]), nir_load_var(&b, gsc_avail)), 0x80000000);
+ 
+    /* Only compute result if available. */
+    nir_push_if(&b, result_is_available);
+@@ -892,8 +968,13 @@ build_tfb_query_shader()
+    packed64[3] = nir_pack_64_2x32(&b, nir_vec2(&b, nir_channel(&b, load2, 2), nir_channel(&b, load2, 3)));
+ 
+    /* Compute result. */
+-   nir_def *num_primitive_written = nir_isub(&b, packed64[3], packed64[1]);
+-   nir_def *primitive_storage_needed = nir_isub(&b, packed64[2], packed64[0]);
++   nir_def *gsc = nir_load_var(&b, gsc_counts);
++   nir_def *num_primitive_written =
++      nir_iadd(&b, nir_isub(&b, packed64[3], packed64[1]),
++               nir_u2u64(&b, nir_isub(&b, nir_channel(&b, gsc, 3), nir_channel(&b, gsc, 1))));
++   nir_def *primitive_storage_needed =
++      nir_iadd(&b, nir_isub(&b, packed64[2], packed64[0]),
++               nir_u2u64(&b, nir_isub(&b, nir_channel(&b, gsc, 2), nir_channel(&b, gsc, 0))));
+ 
+    nir_store_var(&b, result, nir_vec2(&b, num_primitive_written, primitive_storage_needed), 0x3);
+    nir_store_var(&b, available, nir_imm_true(&b), 0x1);
+@@ -962,7 +1043,8 @@ radv_alloc_shader_query_buf(struct radv_cmd_buffer *cmd_buffer)
+ }
+ 
+ static void
+-radv_begin_tfb_query(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint32_t index)
++radv_begin_tfb_query(struct radv_cmd_buffer *cmd_buffer, const struct radv_query_pool *pool, uint64_t va,
++                     uint32_t index)
+ {
+    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+    const struct radv_physical_device *pdev = radv_device_physical(device);
+@@ -987,11 +1069,19 @@ radv_begin_tfb_query(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint32_t i
+       radv_update_hw_pipelinestat(cmd_buffer);
+ 
+       emit_sample_streamout(cmd_buffer, va, index);
++
++      if (pool->gs_compute_counts) {
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_GEN_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_TFB_OFFSET);
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_XFB_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_TFB_OFFSET + 8);
++      }
+    }
+ }
+ 
+ static void
+-radv_end_tfb_query(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint32_t index)
++radv_end_tfb_query(struct radv_cmd_buffer *cmd_buffer, const struct radv_query_pool *pool, uint64_t va,
++                   uint32_t index)
+ {
+    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+    const struct radv_physical_device *pdev = radv_device_physical(device);
+@@ -1016,6 +1106,13 @@ radv_end_tfb_query(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint32_t ind
+       radv_update_hw_pipelinestat(cmd_buffer);
+ 
+       emit_sample_streamout(cmd_buffer, va + 16, index);
++
++      if (pool->gs_compute_counts) {
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_GEN_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_TFB_OFFSET + 16);
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_XFB_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_TFB_OFFSET + 24);
++      }
+    }
+ }
+ 
+@@ -1032,17 +1129,18 @@ radv_copy_tfb_query_result(struct radv_cmd_buffer *cmd_buffer, struct radv_query
+          unsigned query = first_query + i;
+          uint64_t src_va = va + query * pool->stride;
+ 
+-         radeon_check_space(device->ws, cs->b, 7 * 4);
++         radeon_check_space(device->ws, cs->b, 7 * 8);
+ 
+          /* Wait on the upper word of all results. */
+-         for (unsigned j = 0; j < 4; j++, src_va += 8) {
++         for (unsigned j = 0; j < (pool->gs_compute_counts ? 8 : 4); j++, src_va += 8) {
+             radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + 4, 0x80000000, 0xffffffff);
+          }
+       }
+    }
+ 
+    radv_query_shader(cmd_buffer, VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, pool->bo, first_query * pool->stride,
+-                     dst_va, pool->stride, stride, query_count, flags, 0, 0, false);
++                     dst_va, pool->stride, stride, query_count, flags, 0, 0,
++                     pool->gs_compute_counts ? RADV_QUERY_FLAG_GS_COMPUTE : 0);
+ }
+ 
+ /**
+@@ -1243,12 +1341,16 @@ build_pg_query_shader()
+    /* Compute global ID. */
+    nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
+ 
+-   /* Determine if the query pool uses emulated queries for NGG. */
+-   nir_def *uses_emulated_queries = nir_i2b(&b, nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 32), .range = 36));
++   /* Determine if the query pool uses emulated queries for NGG, and whether
++    * geometry shaders run as compute counted too. */
++   nir_def *query_flags = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 32), .range = 36);
++   nir_def *uses_emulated_queries = nir_test_mask(&b, query_flags, RADV_QUERY_FLAG_EMULATED);
++   nir_def *gs_compute = nir_test_mask(&b, query_flags, RADV_QUERY_FLAG_GS_COMPUTE);
+ 
+    /* Compute src/dst strides. */
+    nir_def *input_stride =
+-      nir_bcsel(&b, uses_emulated_queries, nir_imm_int(&b, RADV_PGQ_STRIDE_EMU), nir_imm_int(&b, RADV_PGQ_STRIDE));
++      nir_bcsel(&b, gs_compute, nir_imm_int(&b, RADV_QUERY_GS_COMPUTE_PGQ_STRIDE),
++                nir_bcsel(&b, uses_emulated_queries, nir_imm_int(&b, RADV_PGQ_STRIDE_EMU), nir_imm_int(&b, RADV_PGQ_STRIDE)));
+    nir_def *input_base = nir_imul(&b, input_stride, global_id);
+    nir_def *output_stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 20), .range = 24);
+    nir_def *output_base = nir_imul(&b, output_stride, global_id);
+@@ -1277,6 +1379,18 @@ build_pg_query_shader()
+    }
+    nir_pop_if(&b, NULL);
+ 
++   nir_push_if(&b, gs_compute);
++   {
++      nir_def *gsc = nir_load_global(
++         &b, 4, 32, nir_iadd(&b, src_va, nir_u2u64(&b, nir_iadd_imm(&b, input_base, RADV_QUERY_GS_COMPUTE_PGQ_OFFSET))),
++         .align_mul = 16);
++      nir_def *gsc_available =
++         nir_i2b(&b, nir_iand_imm(&b, nir_iand(&b, nir_channel(&b, gsc, 1), nir_channel(&b, gsc, 3)), 0x80000000));
++
++      nir_store_var(&b, available, nir_iand(&b, nir_load_var(&b, available), gsc_available), 0x1);
++   }
++   nir_pop_if(&b, NULL);
++
+    /* Only compute result if available. */
+    nir_push_if(&b, nir_load_var(&b, available));
+ 
+@@ -1303,6 +1417,17 @@ build_pg_query_shader()
+    }
+    nir_pop_if(&b, NULL);
+ 
++   nir_push_if(&b, gs_compute);
++   {
++      nir_def *gsc = nir_load_global(
++         &b, 4, 32, nir_iadd(&b, src_va, nir_u2u64(&b, nir_iadd_imm(&b, input_base, RADV_QUERY_GS_COMPUTE_PGQ_OFFSET))),
++         .align_mul = 16);
++      nir_def *gsc_result = nir_isub(&b, nir_channel(&b, gsc, 2), nir_channel(&b, gsc, 0));
++
++      nir_store_var(&b, result, nir_iadd(&b, nir_load_var(&b, result), nir_u2u64(&b, gsc_result)), 0x1);
++   }
++   nir_pop_if(&b, NULL);
++
+    nir_pop_if(&b, NULL);
+ 
+    /* Determine if result is 64 or 32 bit. */
+@@ -1376,6 +1501,10 @@ radv_begin_pg_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *
+       }
+ 
+       emit_sample_streamout(cmd_buffer, va, index);
++
++      if (pool->gs_compute_counts)
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_GEN_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_PGQ_OFFSET);
+    }
+ }
+ 
+@@ -1422,6 +1551,10 @@ radv_end_pg_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *po
+       }
+ 
+       emit_sample_streamout(cmd_buffer, va + 16, index);
++
++      if (pool->gs_compute_counts)
++         radv_copy_gs_compute_count(cmd_buffer, RADV_SHADER_QUERY_PRIM_GEN_OFFSET(index),
++                                    va + RADV_QUERY_GS_COMPUTE_PGQ_OFFSET + 8);
+    }
+ }
+ 
+@@ -1441,7 +1574,7 @@ radv_copy_pg_query_result(struct radv_cmd_buffer *cmd_buffer, struct radv_query_
+          unsigned query = first_query + i;
+          uint64_t src_va = va + query * pool->stride;
+ 
+-         radeon_check_space(device->ws, cs->b, 7 * 4);
++         radeon_check_space(device->ws, cs->b, 7 * 6);
+ 
+          /* Wait on the upper word of the PrimitiveStorageNeeded result. */
+          radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + 4, 0x80000000, 0xffffffff);
+@@ -1451,12 +1584,20 @@ radv_copy_pg_query_result(struct radv_cmd_buffer *cmd_buffer, struct radv_query_
+             radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + 36, 0x80000000, 0xffffffff);
+             radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + 44, 0x80000000, 0xffffffff);
+          }
++
++         if (pool->gs_compute_counts) {
++            radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + RADV_QUERY_GS_COMPUTE_PGQ_OFFSET + 4,
++                             0x80000000, 0xffffffff);
++            radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, src_va + RADV_QUERY_GS_COMPUTE_PGQ_OFFSET + 12,
++                             0x80000000, 0xffffffff);
++         }
+       }
+    }
+ 
+    radv_query_shader(cmd_buffer, VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT, pool->bo, first_query * pool->stride, dst_va,
+                      pool->stride, stride, query_count, flags, 0, 0,
+-                     pool->uses_emulated_queries && pdev->info.gfx_level < GFX11);
++                     (pool->uses_emulated_queries && pdev->info.gfx_level < GFX11 ? RADV_QUERY_FLAG_EMULATED : 0) |
++                        (pool->gs_compute_counts ? RADV_QUERY_FLAG_GS_COMPUTE : 0));
+ }
+ 
+ /**
+@@ -1787,7 +1928,7 @@ get_pipeline(struct radv_device *device, VkQueryType query_type, VkPipeline *pip
+ static void
+ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type, struct radeon_winsys_bo *src_bo,
+                   uint64_t src_offset, uint64_t dst_va, uint32_t src_stride, uint32_t dst_stride, uint32_t count,
+-                  uint32_t flags, uint32_t pipeline_stats_mask, uint32_t avail_offset, bool uses_emulated_queries)
++                  uint32_t flags, uint32_t pipeline_stats_mask, uint32_t avail_offset, uint32_t query_flags)
+ {
+    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+    VkPipelineLayout layout;
+@@ -1814,7 +1955,7 @@ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type, st
+ 
+    const uint32_t push_constants[9] = {
+       src_va,     src_va >> 32,        dst_va,       dst_va >> 32,          flags,
+-      dst_stride, pipeline_stats_mask, avail_offset, uses_emulated_queries,
++      dst_stride, pipeline_stats_mask, avail_offset, query_flags,
+    };
+ 
+    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+@@ -1943,10 +2084,14 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
+       pool->stride = 8;
+       break;
+    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
+-      pool->stride = 32;
++      pool->gs_compute_counts = radv_query_counts_gs_compute(pdev);
++      pool->stride = pool->gs_compute_counts ? RADV_QUERY_GS_COMPUTE_TFB_STRIDE : 32;
+       break;
+    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
+-      if (pool->uses_emulated_queries && pdev->info.gfx_level < GFX11) {
++      pool->gs_compute_counts = radv_query_counts_gs_compute(pdev);
++      if (pool->gs_compute_counts) {
++         pool->stride = RADV_QUERY_GS_COMPUTE_PGQ_STRIDE;
++      } else if (pool->uses_emulated_queries && pdev->info.gfx_level < GFX11) {
+          /* When the hardware can use both the legacy and the NGG paths in the same begin/end pair,
+           * allocate 2x64-bit values for the emulated counters.
+           */
+@@ -2224,9 +2369,10 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
+           *	u64 PrimitiveStorageNeeded;
+           * }
+           */
++         const unsigned slots = pool->gs_compute_counts ? 8 : 4;
+          do {
+             available = 1;
+-            for (int j = 0; j < 4; j++) {
++            for (int j = 0; j < slots; j++) {
+                if (!(p_atomic_read(&src64[j].value) & 0x8000000000000000UL))
+                   available = 0;
+             }
+@@ -2240,6 +2386,14 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
+          num_primitives_written = p_atomic_read_relaxed(&src64[3].value) - p_atomic_read_relaxed(&src64[1].value);
+          primitive_storage_needed = p_atomic_read_relaxed(&src64[2].value) - p_atomic_read_relaxed(&src64[0].value);
+ 
++         if (pool->gs_compute_counts) {
++            /* What geometry shaders run as compute wrote and generated. */
++            num_primitives_written +=
++               (uint32_t)(p_atomic_read_relaxed(&src64[7].value) - p_atomic_read_relaxed(&src64[5].value));
++            primitive_storage_needed +=
++               (uint32_t)(p_atomic_read_relaxed(&src64[6].value) - p_atomic_read_relaxed(&src64[4].value));
++         }
++
+          if (flags & VK_QUERY_RESULT_64_BIT) {
+             if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT))
+                *(uint64_t *)dest = num_primitives_written;
+@@ -2278,6 +2432,10 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
+                                           !(p_atomic_read(&src64[5].value) & 0x8000000000000000UL))) {
+                available = 0;
+             }
++            if (pool->gs_compute_counts && (!(p_atomic_read(&src64[6].value) & 0x8000000000000000UL) ||
++                                            !(p_atomic_read(&src64[7].value) & 0x8000000000000000UL))) {
++               available = 0;
++            }
+          } while (!available && (flags & VK_QUERY_RESULT_WAIT_BIT) && !(timed_out = (atimeout < os_time_get_nano())));
+ 
+          if (timed_out)
+@@ -2292,6 +2450,12 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
+             primitive_storage_needed += p_atomic_read_relaxed(&src64[5].value) - p_atomic_read_relaxed(&src64[4].value);
+          }
+ 
++         if (pool->gs_compute_counts) {
++            /* What geometry shaders run as compute generated. */
++            primitive_storage_needed +=
++               (uint32_t)(p_atomic_read_relaxed(&src64[7].value) - p_atomic_read_relaxed(&src64[6].value));
++         }
++
+          if (flags & VK_QUERY_RESULT_64_BIT) {
+             if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT))
+                *(uint64_t *)dest = primitive_storage_needed;
+@@ -2597,7 +2761,7 @@ emit_begin_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *poo
+       radv_begin_pipeline_stat_query(cmd_buffer, pool, va);
+       break;
+    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
+-      radv_begin_tfb_query(cmd_buffer, va, index);
++      radv_begin_tfb_query(cmd_buffer, pool, va, index);
+       break;
+    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
+       radv_begin_pg_query(cmd_buffer, pool, va, index);
+@@ -2631,7 +2795,7 @@ emit_end_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *pool,
+       radv_end_pipeline_stat_query(cmd_buffer, pool, va, avail_va);
+       break;
+    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
+-      radv_end_tfb_query(cmd_buffer, va, index);
++      radv_end_tfb_query(cmd_buffer, pool, va, index);
+       break;
+    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
+       radv_end_pg_query(cmd_buffer, pool, va, index);
+diff --git a/src/amd/vulkan/radv_query.h b/src/amd/vulkan/radv_query.h
+index 7df336d6f7e..66f34754fc1 100644
+--- a/src/amd/vulkan/radv_query.h
++++ b/src/amd/vulkan/radv_query.h
+@@ -25,6 +25,10 @@ struct radv_query_pool {
+    uint64_t size;
+    char *ptr;
+    bool uses_emulated_queries;
++   /* Primitives generated and transform feedback queries also sample the
++    * memory counters of geometry shaders run as compute
++    * (radv_gs_compute_query_counters), in RADV_QUERY_GS_COMPUTE_* slots. */
++   bool gs_compute_counts;
+    bool uses_ace;              /* For task shader invocations on GFX10.3+ */
+    bool uses_shader_query_buf; /* For generated/written primitives on GFX12+ */
+ };
+diff --git a/src/amd/vulkan/radv_shader_args.c b/src/amd/vulkan/radv_shader_args.c
+index 8c36d19eb45..57192631d6e 100644
+--- a/src/amd/vulkan/radv_shader_args.c
++++ b/src/amd/vulkan/radv_shader_args.c
+@@ -200,6 +200,9 @@ declare_vs_specific_input_sgprs(struct radv_shader_args_state *state, const stru
+    if (info->vs.has_prolog)
+       RADV_ADD_UD_ARG(state, 2, AC_ARG_VALUE, prolog_inputs, AC_UD_VS_PROLOG_INPUTS);
+ 
++   if (info->gs_compute == RADV_GS_COMPUTE_RAST)
++      RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, gs_compute_draw, AC_UD_VS_GS_COMPUTE_DRAW);
++
+    if (info->type != RADV_SHADER_TYPE_GS_COPY) {
+       if (info->vs.vb_desc_usage_mask) {
+          RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ac.vertex_buffers, AC_UD_VS_VERTEX_BUFFERS);
+@@ -638,6 +641,12 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
+          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.draw_id, AC_UD_CS_TASK_DRAW_ID);
+       }
+ 
++      if (info->gs_compute != RADV_GS_COMPUTE_NONE) {
++         RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, gs_compute_draw, AC_UD_CS_GS_COMPUTE_DRAW);
++         if (info->gs_compute == RADV_GS_COMPUTE_VS)
++            RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ac.vertex_buffers, AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS);
++      }
++
+       if (stage == MESA_SHADER_TASK) {
+          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.task_ring_entry, AC_UD_TASK_RING_ENTRY);
+ 
+diff --git a/src/amd/vulkan/radv_shader_args.h b/src/amd/vulkan/radv_shader_args.h
+index 0b1335106c4..0d32c79f285 100644
+--- a/src/amd/vulkan/radv_shader_args.h
++++ b/src/amd/vulkan/radv_shader_args.h
+@@ -38,6 +38,7 @@ enum radv_ud_index {
+    AC_UD_VS_VERTEX_BUFFERS = AC_UD_SHADER_START,
+    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
+    AC_UD_VS_PROLOG_INPUTS,
++   AC_UD_VS_GS_COMPUTE_DRAW, /* radv_gs_compute.h: the rasterization VS's draw block */
+    AC_UD_VS_MAX_UD,
+    AC_UD_PS_STATE,
+    AC_UD_PS_MAX_UD,
+@@ -49,6 +50,8 @@ enum radv_ud_index {
+    AC_UD_CS_TASK_RING_OFFSETS,
+    AC_UD_CS_TASK_DRAW_ID,
+    AC_UD_CS_TASK_IB,
++   AC_UD_CS_GS_COMPUTE_DRAW,           /* radv_gs_compute.h: the draw block */
++   AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS, /* and the vertex shader's vertex buffers */
+    AC_UD_CS_MAX_UD,
+    AC_UD_GS_MAX_UD,
+    AC_UD_TCS_OFFCHIP_LAYOUT = AC_UD_VS_MAX_UD,
+@@ -76,6 +79,9 @@ struct radv_userdata_locations {
+ struct radv_shader_args {
+    struct ac_shader_args ac;
+ 
++   /* radv_gs_compute.h: the per-draw block of a geometry shader run as compute. */
++   struct ac_arg gs_compute_draw;
++
+    struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
+ 
+    /* Streamout */
+diff --git a/src/amd/vulkan/radv_shader_info.h b/src/amd/vulkan/radv_shader_info.h
+index 8b4973a81b6..6d63e5ad697 100644
+--- a/src/amd/vulkan/radv_shader_info.h
++++ b/src/amd/vulkan/radv_shader_info.h
+@@ -76,6 +76,16 @@ struct gfx10_ngg_info {
+    bool max_vert_out_per_gs_instance;
+ };
+ 
++/* Which part of a geometry shader run as compute a shader is (radv_gs_compute.h). */
++enum radv_gs_compute_kind {
++   RADV_GS_COMPUTE_NONE = 0,
++   RADV_GS_COMPUTE_VS,     /* the vertex shader, outputs to memory */
++   RADV_GS_COMPUTE_COUNT,  /* per-primitive output counts; the GS's memory writes */
++   RADV_GS_COMPUTE_PRE_GS, /* transform feedback and query setup */
++   RADV_GS_COMPUTE_MAIN,   /* transform feedback and the rasterized index buffer */
++   RADV_GS_COMPUTE_RAST,   /* the hardware vertex shader drawing the GS output */
++};
++
+ struct radv_shader_info {
+    uint32_t workgroup_size;
+    uint32_t nir_shared_size;
+@@ -92,6 +102,9 @@ struct radv_shader_info {
+    struct radv_vs_output_info outinfo;
+ 
+    uint8_t wave_size;
++   /* enum radv_gs_compute_kind: which part of a geometry shader run as
++    * compute this is (radv_gs_compute.h), or none. */
++   uint8_t gs_compute;
+    uint8_t ngg_lds_scratch_size;
+    mesa_shader_stage stage : 8;
+    mesa_shader_stage next_stage : 8;
+diff --git a/src/amd/vulkan/radv_shader_object.c b/src/amd/vulkan/radv_shader_object.c
+index 39278563b70..0918f05728a 100644
+--- a/src/amd/vulkan/radv_shader_object.c
++++ b/src/amd/vulkan/radv_shader_object.c
+@@ -201,7 +201,7 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
+       struct radv_shader_debug_info gs_copy_debug = {0};
+ 
+       radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
+-                                    binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
++                                    binaries, &gs_copy_debug, &shader_obj->gs.copy_binary, NULL);
+       radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
+                                    shader_obj->gs.copy_binary, &gs_copy_debug);
+ 
+@@ -233,7 +233,7 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
+          stages[stage].next_stage = next_stage;
+ 
+          radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
+-                                       binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
++                                       binaries, &gs_copy_debug, &shader_obj->gs.copy_binary, NULL);
+          radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
+                                       shader_obj->gs.copy_binary, &gs_copy_debug);
+ 
+@@ -527,7 +527,7 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
+    struct radv_shader_debug_info gs_copy_debug = {0};
+ 
+    radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug, binaries,
+-                                 &gs_copy_debug, &gs_copy_binary);
++                                 &gs_copy_debug, &gs_copy_binary, NULL);
+    radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &gs_copy_shader, gs_copy_binary,
+                                 &gs_copy_debug);
+ 
+diff --git a/src/compiler/nir/nir_divergence_analysis.c b/src/compiler/nir/nir_divergence_analysis.c
+index 28d930a0fc7..5f236004c3b 100644
+--- a/src/compiler/nir/nir_divergence_analysis.c
++++ b/src/compiler/nir/nir_divergence_analysis.c
+@@ -344,6 +344,17 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
+    case nir_intrinsic_load_alpha_reference_amd:
+    case nir_intrinsic_load_barycentric_optimize_amd:
+    case nir_intrinsic_load_poly_line_smooth_enabled:
++   /* poly's per-draw parameters (src/poly): the same for every invocation. */
++   case nir_intrinsic_load_vertex_param_buffer_poly:
++   case nir_intrinsic_load_geometry_param_buffer_poly:
++   case nir_intrinsic_load_tess_param_buffer_poly:
++   case nir_intrinsic_load_ro_sink_address_poly:
++   case nir_intrinsic_load_stat_query_address_poly:
++   case nir_intrinsic_load_input_topology_poly:
++   case nir_intrinsic_load_index_size_poly:
++   case nir_intrinsic_load_vs_outputs_poly:
++   case nir_intrinsic_load_provoking_last:
++   case nir_intrinsic_load_flat_mask:
+    case nir_intrinsic_load_rasterization_primitive_amd:
+    case nir_intrinsic_unit_test_uniform_input:
+    case nir_intrinsic_load_debug_log_desc_amd:
+@@ -487,6 +498,10 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
+       if (options & nir_divergence_across_subgroups)
+          is_divergent = true;
+       break;
++   case nir_intrinsic_ro_to_rw_poly:
++      /* The same address, writable. */
++      is_divergent = src_divergent(instr->src[0], state);
++      break;
+    case nir_intrinsic_load_input_vertex:
+       is_divergent = src_divergent(instr->src[1], state);
+       assert(stage == MESA_SHADER_FRAGMENT);
+diff --git a/src/poly/nir/poly_nir_lower_gs.c b/src/poly/nir/poly_nir_lower_gs.c
+index e13f4cdd3c7..fabe331365f 100644
+--- a/src/poly/nir/poly_nir_lower_gs.c
++++ b/src/poly/nir/poly_nir_lower_gs.c
+@@ -1348,16 +1348,21 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
+    else
+       *gs_count = NULL;
+ 
+-   /* Strip stores and atomics */
+-   do {
+-      progress = false;
+-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+-               strip_side_effect_from_main, nir_metadata_control_flow,
+-               (void *)true);
+-
+-      NIR_PASS(progress, gs, nir_opt_dce);
+-      NIR_PASS(progress, gs, nir_opt_dead_cf);
+-   } while (progress);
++   /* Strip stores and atomics: the count shader performs them. Without one,
++    * the counts are static and this shader is the only full run of the
++    * geometry shader, so it keeps them.
++    */
++   if (*gs_count) {
++      do {
++         progress = false;
++         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
++                  strip_side_effect_from_main, nir_metadata_control_flow,
++                  (void *)true);
++
++         NIR_PASS(progress, gs, nir_opt_dce);
++         NIR_PASS(progress, gs, nir_opt_dead_cf);
++      } while (progress);
++   }
+ 
+    NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_gs_instr,
+             nir_metadata_none, &gs_state);
+@@ -1381,15 +1386,17 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
+    } while (progress);
+ 
+    /* Strip remaining atomics, but not stores - since those are from us */
+-   do {
+-      progress = false;
+-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+-               strip_side_effect_from_main, nir_metadata_control_flow,
+-               (void *)false);
+-
+-      NIR_PASS(progress, gs, nir_opt_dce);
+-      NIR_PASS(progress, gs, nir_opt_dead_cf);
+-   } while (progress);
++   if (*gs_count) {
++      do {
++         progress = false;
++         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
++                  strip_side_effect_from_main, nir_metadata_control_flow,
++                  (void *)false);
++
++         NIR_PASS(progress, gs, nir_opt_dce);
++         NIR_PASS(progress, gs, nir_opt_dead_cf);
++      } while (progress);
++   }
+ 
+    /* All those variables we created should've gone away by now */
+    NIR_PASS(_, gs, nir_remove_dead_variables, nir_var_function_temp, NULL);

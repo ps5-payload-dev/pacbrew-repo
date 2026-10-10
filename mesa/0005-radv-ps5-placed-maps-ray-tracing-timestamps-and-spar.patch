@@ -1,0 +1,1604 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:37 +0000
+Subject: [PATCH] radv/ps5: placed maps, ray tracing, timestamps and sparse
+ resources
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  8639134f26f radv/ps5: placed memory maps, and no claims the port has not earned
+  6787bbded56 radv/ps5: report acceleration structures and ray queries
+  d42b81c8daa radv/ps5: take the fixed-function traits from Mesa's GFX1013 model
+  8406b615493 aco, radv/ps5: ray tracing pipelines through buffer scratch
+  95eb7128f73 radv/ps5: capture and replay addresses
+  c94770c1caf radv/ps5: calibrated timestamps from the GPU clock
+  c9aec748225 vulkan: no raw monotonic time domain without CLOCK_MONOTONIC_RAW
+  b8a10e9f0db radv/ps5: sparse resources over the platform's mappings
+  b5d43f9af2b radv: sparse images bind a GPU page at a time at least
+  2ae4551c9ab radv/ps5: 3D sparse residency
+  e535075dab2 radv: the SMEM null PRT workaround only with PRT sparse binding
+  472a9840209 radv/ps5: sparse descriptor buffers in the 32-bit window
+  6a3962bf520 radv: dedicated sparse queue only with native timelines
+  8014f6773cb aco: borrow into the scratch descriptor's high word right on restore
+  30fcf1b9dd3 radv/ps5: the host model releases its window when the driver unloads
+---
+ src/amd/common/ac_gpu_info.c                  |   5 +
+ src/amd/common/ac_gpu_info.h                  |  12 +
+ src/amd/compiler/aco_lower_to_hw_instr.cpp    |   8 +-
+ src/amd/compiler/aco_spill_preserved.cpp      |  17 +-
+ src/amd/compiler/aco_validate.cpp             |   5 +-
+ .../aco_instruction_selection.h               |   2 +-
+ .../aco_isel_helpers.cpp                      |   4 +-
+ .../instruction_selection/aco_select_nir.cpp  |  12 +-
+ .../aco_select_nir_intrinsics.cpp             |  14 +-
+ src/amd/vulkan/radv_buffer.c                  |   2 +-
+ src/amd/vulkan/radv_device.c                  |   6 +-
+ src/amd/vulkan/radv_image.c                   |   3 +-
+ src/amd/vulkan/radv_physical_device.c         |  36 +-
+ src/amd/vulkan/radv_physical_device.h         |   5 +-
+ src/amd/vulkan/radv_queue.c                   |  11 +
+ src/amd/vulkan/winsys/ps5/radv_ps5_bo.c       |  89 +++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_cs.c       |  48 +++
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 405 +++++++++++++++++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |  25 ++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   | 203 +++++----
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h   |   9 +
+ src/vulkan/runtime/vk_device.c                |  10 +-
+ 22 files changed, 776 insertions(+), 155 deletions(-)
+
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index 688c540c6e3..467deca3144 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -1072,6 +1072,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
+    info->has_ps_strict_vertex_order = info->gfx_level >= GFX10_3;
+    info->has_vrs = info->gfx_level >= GFX10_3;
+    info->has_replayable_va = true;
++   info->has_replayable_va_32bit = true;
+    info->has_syncobj = true;
+    info->has_fence_to_handle = true;
+ 
+@@ -1091,6 +1092,9 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
+     * Enable them when these are investigated and fixed in the driver.
+     */
+    info->has_sparse = info->family >= CHIP_POLARIS10;
++   info->has_sparse_prt = info->has_sparse;
++   info->has_sparse_cpu_binds = false;
++   info->max_sparse_va_bytes = UINT64_MAX;
+    info->has_sparse_image_3d = info->gfx_level >= GFX7;
+    info->has_sparse_image_standard_3d = info->gfx_level >= GFX9;
+    info->has_sparse_unaligned_mip_size = info->gfx_level >= GFX7;
+@@ -2076,6 +2080,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
+    fprintf(f, "    has_ps_strict_vertex_order = %i\n", info->has_ps_strict_vertex_order);
+    fprintf(f, "    has_vrs = %i\n", info->has_vrs);
+    fprintf(f, "    has_replayable_va = %i\n", info->has_replayable_va);
++   fprintf(f, "    has_replayable_va_32bit = %i\n", info->has_replayable_va_32bit);
+    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
+    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
+    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
+diff --git a/src/amd/common/ac_gpu_info.h b/src/amd/common/ac_gpu_info.h
+index cd987d16ecb..7aba81a3532 100644
+--- a/src/amd/common/ac_gpu_info.h
++++ b/src/amd/common/ac_gpu_info.h
+@@ -402,6 +402,9 @@ struct radeon_info {
+     * was given (RADEON_FLAG_REPLAYABLE with a replay address): every capture
+     * and replay feature needs it. */
+    bool has_replayable_va;
++   /* The same for buffers in the 32-bit address window (shader arenas):
++    * ray tracing shader group handle capture and replay needs it. */
++   bool has_replayable_va_32bit;
+    bool has_syncobj;
+    bool has_timeline_syncobj;
+    bool has_fence_to_handle;
+@@ -409,6 +412,15 @@ struct radeon_info {
+    bool has_eqaa_surface_allocator;
+    /* Sparse bindings and basic sparse features (2D image, etc.) */
+    bool has_sparse;
++   /* Whether an unbound sparse page reads zeros and a shader can tell it is
++    * not resident (PRT page table entries): residencyNonResidentStrict and
++    * shaderResourceResidency need it. */
++   bool has_sparse_prt;
++   /* Whether a sparse bind takes effect the moment the winsys makes it (a CPU
++    * mapping change), so it must wait for the submission's waits first. */
++   bool has_sparse_cpu_binds;
++   /* How much address space sparse resources can take in all. */
++   uint64_t max_sparse_va_bytes;
+    /* 3D sparse images */
+    bool has_sparse_image_3d;
+    /* 3D sparse images with standard block shape */
+diff --git a/src/amd/compiler/aco_lower_to_hw_instr.cpp b/src/amd/compiler/aco_lower_to_hw_instr.cpp
+index 337e296ad31..f68ee1a85d3 100644
+--- a/src/amd/compiler/aco_lower_to_hw_instr.cpp
++++ b/src/amd/compiler/aco_lower_to_hw_instr.cpp
+@@ -2929,7 +2929,7 @@ lower_to_hw_instr(Program* program)
+                   ctx.program->config->scratch_bytes_per_wave / ctx.program->wave_size;
+                unsigned scratch_param_size = instr->operands[0].constantValue();
+                unsigned callee_stack_start = caller_stack_size + scratch_param_size;
+-               if (ctx.program->gfx_level < GFX9)
++               if (ctx.program->dev.mubuf_scratch)
+                   callee_stack_start *= ctx.program->wave_size;
+                if (instr->operands.size() < 2)
+                   bld.sop1(aco_opcode::s_mov_b32, instr->definitions[0],
+@@ -2975,14 +2975,14 @@ lower_to_hw_instr(Program* program)
+             unsigned extra_param_count = 2;
+             PhysReg stack_reg = instr->operands[0].physReg();
+             unsigned scratch_size = ctx.program->config->scratch_bytes_per_wave;
+-            if (ctx.program->gfx_level >= GFX9)
++            if (!ctx.program->dev.mubuf_scratch)
+                scratch_size /= ctx.program->wave_size;
+ 
+             if (instr->operands[1].constantValue() || scratch_size) {
+                bld.sop2(aco_opcode::s_add_u32, Definition(stack_reg, s1), Definition(scc, s1),
+                         Operand(stack_reg, s1),
+                         Operand::c32(instr->operands[1].constantValue() + scratch_size));
+-               if (program->gfx_level < GFX9) {
++               if (program->dev.mubuf_scratch) {
+                   /* The callee's VGPR spill buffer resource needs to be based at the
+                    * start of callee scratch.
+                    */
+@@ -2999,7 +2999,7 @@ lower_to_hw_instr(Program* program)
+                bld.sop2(aco_opcode::s_sub_u32, Definition(stack_reg, s1), Definition(scc, s1),
+                         Operand(stack_reg, s1),
+                         Operand::c32(instr->operands[1].constantValue() + scratch_size));
+-               if (program->gfx_level < GFX9) {
++               if (program->dev.mubuf_scratch) {
+                   PhysReg rsrc_dword1 = stack_reg.advance(4);
+                   bld.sop2(aco_opcode::s_subb_u32, Definition(rsrc_dword1, s1), Definition(scc, s1),
+                            Operand(rsrc_dword1, s1), Operand::c32(0), Operand(scc, s1));
+diff --git a/src/amd/compiler/aco_spill_preserved.cpp b/src/amd/compiler/aco_spill_preserved.cpp
+index 80fa7a6ea2c..1a89383ebd0 100644
+--- a/src/amd/compiler/aco_spill_preserved.cpp
++++ b/src/amd/compiler/aco_spill_preserved.cpp
+@@ -188,12 +188,12 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
+    if (overflow) {
+       spill_stack_base = first_spill_offset;
+ 
+-      if (ctx.program->gfx_level < GFX9)
++      if (ctx.program->dev.mubuf_scratch)
+          first_spill_offset *= ctx.program->wave_size;
+ 
+       bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg, s1), Definition(scc, s1),
+                Operand(stack_reg, s1), Operand::c32(first_spill_offset), Operand(scc, s1));
+-      if (ctx.program->gfx_level < GFX9)
++      if (ctx.program->dev.mubuf_scratch)
+          bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
+                   Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
+       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
+@@ -202,7 +202,7 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
+    }
+ 
+    for (const auto& spill : spills) {
+-      if (ctx.program->gfx_level >= GFX9) {
++      if (!ctx.program->dev.mubuf_scratch) {
+          if (reload)
+             bld.scratch(aco_opcode::scratch_load_dword, Definition(spill.first, linear ? lv1 : v1),
+                         Operand(v1), Operand(stack_reg, s1), spill.second - spill_stack_base,
+@@ -232,9 +232,12 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
+    if (overflow) {
+       bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg, s1), Definition(scc, s1),
+                Operand(stack_reg, s1), Operand::c32(-first_spill_offset), Operand(scc, s1));
+-      if (ctx.program->gfx_level < GFX9)
+-         bld.sop2(aco_opcode::s_subb_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
+-                  Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
++      /* Adding the negative offset carries out when nothing was borrowed: the
++       * high word takes -1 plus that carry.
++       */
++      if (ctx.program->dev.mubuf_scratch)
++         bld.sop2(aco_opcode::s_addc_u32, Definition(stack_reg.advance(4), s1), Definition(scc, s1),
++                  Operand(stack_reg.advance(4), s1), Operand::c32(-1u), Operand(scc, s1));
+       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
+                Operand::c32(0));
+       bld.sop1(aco_opcode::s_bitset0_b32, Definition(stack_reg, s1), Operand::c32(0),
+@@ -537,7 +540,7 @@ emit_call_spills(spill_preserved_ctx& ctx)
+             Builder bld(ctx.program, &spill_instructions);
+ 
+             PhysReg stack_reg = instr->operands[0].physReg();
+-            if (ctx.program->gfx_level < GFX9)
++            if (ctx.program->dev.mubuf_scratch)
+                scratch_offset *= ctx.program->wave_size;
+ 
+             emit_vgpr_spills_reloads(ctx, bld, spills, stack_reg, false, true);
+diff --git a/src/amd/compiler/aco_validate.cpp b/src/amd/compiler/aco_validate.cpp
+index 45f99fb1870..8530f835ccd 100644
+--- a/src/amd/compiler/aco_validate.cpp
++++ b/src/amd/compiler/aco_validate.cpp
+@@ -1041,8 +1041,9 @@ validate_ir(Program* program)
+                   "The first definition of a call instruction must be the return address",
+                   instr.get());
+ 
+-            /* On gfx6-8 the stack pointer is part of the scratch resource descriptor */
+-            if (program->gfx_level >= GFX9) {
++            /* With buffer scratch (gfx6-8, and where a shader cannot set FLAT_SCRATCH) the
++             * stack pointer is part of the scratch resource descriptor */
++            if (!program->dev.mubuf_scratch) {
+                check(instr->operands[0].regClass() == s1,
+                      "The first operand of a call instruction must be the stack pointer",
+                      instr.get());
+diff --git a/src/amd/compiler/instruction_selection/aco_instruction_selection.h b/src/amd/compiler/instruction_selection/aco_instruction_selection.h
+index 6b21a3e532c..4a4ff1ccccd 100644
+--- a/src/amd/compiler/instruction_selection/aco_instruction_selection.h
++++ b/src/amd/compiler/instruction_selection/aco_instruction_selection.h
+@@ -312,7 +312,7 @@ ABI nir_abi_to_aco(unsigned nir_abi_mask);
+ param_assignment_hints get_ahit_isec_param_hints(const struct callee_info& traversal_info,
+                                                  bool uses_descriptor_heap);
+ 
+-struct callee_info get_callee_info(amd_gfx_level gfx_level, unsigned wave_size, const ABI& abi,
++struct callee_info get_callee_info(bool mubuf_scratch, unsigned wave_size, const ABI& abi,
+                                    unsigned param_count, const nir_parameter* parameters,
+                                    Program* program, RegisterDemand reg_limit,
+                                    const param_assignment_hints& param_hints = {});
+diff --git a/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp b/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
+index 19f041d504b..5f21dd2c320 100644
+--- a/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
++++ b/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
+@@ -1132,7 +1132,7 @@ find_param_regs(Program* program, const ABI& abi, callee_info& info,
+ }
+ 
+ struct callee_info
+-get_callee_info(amd_gfx_level gfx_level, unsigned wave_size, const ABI& abi, unsigned param_count,
++get_callee_info(bool mubuf_scratch, unsigned wave_size, const ABI& abi, unsigned param_count,
+                 const nir_parameter* parameters, Program* program, RegisterDemand reg_limit,
+                 const param_assignment_hints& param_hints)
+ {
+@@ -1159,7 +1159,7 @@ get_callee_info(amd_gfx_level gfx_level, unsigned wave_size, const ABI& abi, uns
+    return_def_info.force_reg = true;
+    assignment_infos.push_back(return_def_info);
+ 
+-   if (gfx_level >= GFX9) {
++   if (!mubuf_scratch) {
+       Temp stack_ptr = program ? program->allocateTmp(s1) : Temp();
+       Definition stack_def = Definition(stack_ptr);
+       info.stack_ptr = {};
+diff --git a/src/amd/compiler/instruction_selection/aco_select_nir.cpp b/src/amd/compiler/instruction_selection/aco_select_nir.cpp
+index a12f44c9c14..bf1f7575e2b 100644
+--- a/src/amd/compiler/instruction_selection/aco_select_nir.cpp
++++ b/src/amd/compiler/instruction_selection/aco_select_nir.cpp
+@@ -760,7 +760,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
+    RegisterDemand limit = get_addr_regs_from_waves(ctx->program, ctx->program->min_waves);
+ 
+    struct callee_info info =
+-      get_callee_info(ctx->program->gfx_level, ctx->program->wave_size, abi,
++      get_callee_info(ctx->program->dev.mubuf_scratch, ctx->program->wave_size, abi,
+                       instr->callee->num_params, instr->callee->params, nullptr, limit, hints);
+    std::vector<parameter_info> return_infos;
+ 
+@@ -778,7 +778,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
+     */
+ 
+    Temp stack_ptr, param_stack_ptr;
+-   if (ctx->program->is_callee && ctx->program->gfx_level >= GFX9) {
++   if (ctx->program->is_callee && !ctx->program->dev.mubuf_scratch) {
+       param_stack_ptr = bld.pseudo(aco_opcode::p_callee_stack_ptr, bld.def(s1), bld.def(s1, scc),
+                                    Operand::c32(info.scratch_param_size),
+                                    Operand(ctx->callee_info.stack_ptr.def.getTemp()));
+@@ -801,7 +801,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
+    unsigned extra_param_count = 2;
+ 
+    unsigned param_size = info.scratch_param_size;
+-   if (ctx->program->gfx_level < GFX9)
++   if (ctx->program->dev.mubuf_scratch)
+       param_size *= ctx->program->wave_size;
+ 
+    assert(info.param_infos[0].is_reg);
+@@ -809,7 +809,7 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
+                                                 info.reg_param_count + extra_param_count,
+                                                 info.reg_discardable_param_count + extra_def_count);
+    call_instr->call().abi = abi;
+-   if (ctx->program->gfx_level >= GFX9) {
++   if (!ctx->program->dev.mubuf_scratch) {
+       call_instr->operands[0] = Operand(stack_ptr, info.stack_ptr.def.physReg());
+    } else {
+       call_instr->operands[0] = Operand(load_scratch_resource(ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true));
+@@ -1387,7 +1387,7 @@ select_program_rt(isel_context& ctx, unsigned shader_count, struct nir_shader* c
+       if (nir_abi == ACO_NIR_CALL_ABI_AHIT_ISEC) {
+          assert(traversal_function);
+          callee_info traversal_info = get_callee_info(
+-            ctx.program->gfx_level, ctx.program->wave_size, rtTraversalABI,
++            ctx.program->dev.mubuf_scratch, ctx.program->wave_size, rtTraversalABI,
+             traversal_function->num_params, traversal_function->params, NULL, limit);
+          callee_hints =
+             get_ahit_isec_param_hints(traversal_info, ctx.program->info.descriptor_heap);
+@@ -1396,7 +1396,7 @@ select_program_rt(isel_context& ctx, unsigned shader_count, struct nir_shader* c
+       /* TODO: callable abi? */
+       ctx.callee_abi = nir_abi_to_aco(impl->function->driver_attributes);
+       ctx.program->callee_abi = ctx.callee_abi;
+-      ctx.callee_info = get_callee_info(ctx.program->gfx_level, ctx.program->wave_size,
++      ctx.callee_info = get_callee_info(ctx.program->dev.mubuf_scratch, ctx.program->wave_size,
+                                         ctx.callee_abi, impl->function->num_params,
+                                         impl->function->params, ctx.program, limit, callee_hints);
+       ctx.program->is_callee = true;
+diff --git a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+index c3ae6f592c1..feb6db505fe 100644
+--- a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
++++ b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+@@ -3890,9 +3890,9 @@ load_scratch_param(isel_context* ctx, Builder& bld, const parameter_info& param,
+    info.align_mul = 4;
+    info.align_offset = 0;
+    info.cache = get_cache_flags(ctx, ACCESS_IS_SWIZZLED_AMD, ac_access_type_load);
+-   info.swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 0;
++   info.swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 0;
+    info.sync = memory_sync_info(storage_scratch, semantic_private);
+-   if (ctx->program->gfx_level >= GFX9) {
++   if (!ctx->program->dev.mubuf_scratch) {
+       if (const_offset < ctx->program->dev.scratch_global_offset_min) {
+          stack_ptr = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.def(s1, scc),
+                               stack_ptr == Temp() ? Operand::c32(0) : Operand(stack_ptr),
+@@ -3927,12 +3927,12 @@ store_scratch_param(isel_context* ctx, Builder& bld, const parameter_info& param
+    unsigned write_count = 0;
+    Temp write_datas[32];
+    unsigned offsets[32];
+-   unsigned swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 16;
++   unsigned swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 16;
+    split_buffer_store(ctx, 4, 0, false, RegType::vgpr, as_vgpr(ctx, data),
+                       u_bit_consecutive(0, byte_size), swizzle_component_size, &write_count,
+                       write_datas, offsets);
+ 
+-   if (ctx->program->gfx_level < GFX9) {
++   if (ctx->program->dev.mubuf_scratch) {
+       Temp scratch_rsrc = load_scratch_resource(
+          ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true);
+       for (unsigned i = 0; i < write_count; i++) {
+@@ -5032,7 +5032,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
+                   Operand(info.return_info[index_in_return_params].def.getTemp()));
+       } else {
+          Temp stack_ptr;
+-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
++         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
+             stack_ptr = bld.pseudo(aco_opcode::p_callee_stack_ptr, bld.def(s1), bld.def(s1, scc),
+                                    Operand::c32(info.scratch_param_size),
+                                    Operand(ctx->callee_info.stack_ptr.def.getTemp()));
+@@ -5055,7 +5055,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
+             ctx->allocated_vec.emplace(dst.id(), vec_it->second);
+       } else {
+          Temp stack_ptr = Temp();
+-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
++         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
+             stack_ptr = ctx->callee_info.stack_ptr.def.getTemp();
+          load_scratch_param(ctx, bld, param, stack_ptr, ctx->callee_info.scratch_param_size, dst);
+       }
+@@ -5074,7 +5074,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
+                               : bld.as_uniform(get_ssa_temp(ctx, instr->src[0].ssa)));
+       } else {
+          Temp stack_ptr = Temp();
+-         if (ctx->callee_info.stack_ptr.is_reg && ctx->program->gfx_level >= GFX9)
++         if (ctx->callee_info.stack_ptr.is_reg && !ctx->program->dev.mubuf_scratch)
+             stack_ptr = ctx->callee_info.stack_ptr.def.getTemp();
+          store_scratch_param(ctx, bld, param, stack_ptr, ctx->callee_info.scratch_param_size,
+                              get_ssa_temp(ctx, instr->src[0].ssa));
+diff --git a/src/amd/vulkan/radv_buffer.c b/src/amd/vulkan/radv_buffer.c
+index 645654f153c..908522a2e52 100644
+--- a/src/amd/vulkan/radv_buffer.c
++++ b/src/amd/vulkan/radv_buffer.c
+@@ -68,7 +68,7 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
+       enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
+       uint64_t replay_address = 0;
+ 
+-      if (pdev->info.compiler_info.has_smem_with_null_prt_bug &&
++      if (pdev->info.compiler_info.has_smem_with_null_prt_bug && pdev->info.has_sparse_prt &&
+           (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT) &&
+           (buffer->vk.usage & (VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT |
+                                VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT))) {
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index e0f3246965f..23b61fa72c2 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -1209,8 +1209,10 @@ radv_device_init_compiler_info(struct radv_device *device)
+             .coop_matrix_robust_buffer_access = false,
+             .mitigate_smem_oob = pdev->info.compiler_info.has_smem_oob_access_bug &&
+                                  !(instance->debug_flags & RADV_DEBUG_NO_SMEM_MITIGATION),
+-            .mitigate_smem_with_null_prt =
+-               pdev->info.compiler_info.has_smem_with_null_prt_bug && radv_sparse_enabled(pdev),
++            /* The bug is in loads from null PRT pages, which only PRT sparse
++             * binding makes. */
++            .mitigate_smem_with_null_prt = pdev->info.compiler_info.has_smem_with_null_prt_bug &&
++                                           radv_sparse_enabled(pdev) && pdev->info.has_sparse_prt,
+             .bvh8 = radv_use_bvh8(pdev),
+             .no_rt = !!(instance->debug_flags & RADV_DEBUG_NO_RT),
+             .rt_cps = !!(instance->perftest_flags & RADV_PERFTEST_RT_CPS),
+diff --git a/src/amd/vulkan/radv_image.c b/src/amd/vulkan/radv_image.c
+index 05d02b30dd2..1d3a3c51dad 100644
+--- a/src/amd/vulkan/radv_image.c
++++ b/src/amd/vulkan/radv_image.c
+@@ -1512,7 +1512,8 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
+             replay_address = *((const uint64_t *)opaque_info->pData->address);
+       }
+ 
+-      image->alignment = MAX2(image->alignment, 4096);
++      /* Memory is bound to a sparse image a GPU page at a time at least. */
++      image->alignment = MAX2(image->alignment, pdev->info.gart_page_size);
+       image->size = align64(image->size, image->alignment);
+ 
+       result = radv_bo_create(device, &image->vk.base, image->size, image->alignment, 0, flags,
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 518eb5a1d16..18d2b055a6b 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -50,7 +50,8 @@ typedef void *drmDevicePtr;
+ #include <llvm-c/TargetMachine.h>
+ #endif
+ 
+-#if defined(_WIN32) || defined(AMD_NO_DRM)
++/* The PS5 winsys reads the GPU clock through its queue (RADEON_TIMESTAMP). */
++#if defined(_WIN32) || (defined(AMD_NO_DRM) && !defined(RADV_PS5))
+ #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 0
+ #else
+ #define RADV_SUPPORT_CALIBRATED_TIMESTAMPS 1
+@@ -265,12 +266,12 @@ radv_enable_rt(const struct radv_physical_device *pdev)
+ }
+ 
+ /* Ray tracing pipelines call their shaders with a stack in scratch, which
+- * ACO's calling convention addresses with scratch_* instructions on GFX9+:
+- * where a shader cannot set FLAT_SCRATCH, only ray queries are reported. */
++ * ACO addresses through the scratch buffer where a shader cannot set
++ * FLAT_SCRATCH (dev.mubuf_scratch), as on GFX6-8. */
+ bool
+ radv_rt_pipelines_enabled(const struct radv_physical_device *pdev)
+ {
+-   return radv_enable_rt(pdev) && (pdev->info.gfx_level < GFX9 || pdev->info.compiler_info.has_flat_scratch);
++   return radv_enable_rt(pdev);
+ }
+ 
+ bool
+@@ -1069,7 +1070,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .sparseResidencyAliased = enable_sparse,
+       .variableMultisampleRate = true,
+       .shaderResourceMinLod = enable_sparse,
+-      .shaderResourceResidency = enable_sparse,
++      .shaderResourceResidency = enable_sparse && pdev->info.has_sparse_prt,
+       .inheritedQueries = true,
+ 
+       /* Vulkan 1.1 */
+@@ -1348,7 +1349,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+ 
+       /* VK_KHR_ray_tracing_pipeline */
+       .rayTracingPipeline = radv_rt_pipelines_enabled(pdev),
+-      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va,
++      .rayTracingPipelineShaderGroupHandleCaptureReplay =
++         radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va_32bit,
+       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
+       .rayTracingPipelineTraceRaysIndirect = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
+       .rayTraversalPrimitiveCulling = radv_rt_pipelines_enabled(pdev),
+@@ -1844,7 +1846,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .maxMemoryAllocationCount = UINT32_MAX,
+       .maxSamplerAllocationCount = 64 * 1024,
+       .bufferImageGranularity = 1,
+-      .sparseAddressSpaceSize = enable_sparse ? pdev->info.virtual_address_max : 0,
++      .sparseAddressSpaceSize =
++         enable_sparse ? MIN2(pdev->info.virtual_address_max, pdev->info.max_sparse_va_bytes) : 0,
+       .maxBoundDescriptorSets = MAX_SETS,
+       .maxPerStageDescriptorSamplers = max_descriptor_set_size,
+       .maxPerStageDescriptorUniformBuffers = max_descriptor_set_size,
+@@ -1938,7 +1941,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .optimalBufferCopyOffsetAlignment = 1,
+       .optimalBufferCopyRowPitchAlignment = 1,
+       .nonCoherentAtomSize = 64,
+-      .sparseResidencyNonResidentStrict = enable_sparse,
++      .sparseResidencyNonResidentStrict = enable_sparse && pdev->info.has_sparse_prt,
+       .sparseResidencyAlignedMipSize = enable_sparse && !pdev->info.has_sparse_unaligned_mip_size,
+       .sparseResidencyStandard2DBlockShape = enable_sparse,
+       .sparseResidencyStandard3DBlockShape = enable_sparse && pdev->info.has_sparse_image_standard_3d,
+@@ -2328,7 +2331,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
+ 
+       /* VK_EXT_map_memory_placed */
+-      .minPlacedMemoryMapAlignment = os_page_size,
++      /* The kernel maps whole pages, which may be larger than the CPU's. */
++      .minPlacedMemoryMapAlignment = MAX2(os_page_size, pdev->info.gart_page_size),
+ 
+       /* VK_EXT_nested_command_buffer */
+       .maxCommandBufferNestingLevel = UINT32_MAX,
+@@ -2438,12 +2442,18 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+    snprintf(p->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "Mesa " PACKAGE_VERSION MESA_GIT_SHA1 "%s",
+             radv_get_compiler_string(pdev));
+ 
++#ifdef RADV_PS5
++   /* No CTS release has passed on the PS5 yet (PS5_Vulkan CTS_GAPS.md): the
++    * version stays 0.0.0.0 until one does. */
++   p->conformanceVersion = (VkConformanceVersion){0};
++#else
+    p->conformanceVersion = (VkConformanceVersion){
+       .major = 1,
+       .minor = 4,
+       .subminor = 5,
+       .patch = 3,
+    };
++#endif
+ 
+    /* VK_EXT_host_image_copy */
+    static const VkImageLayout supported_layouts[] = {
+@@ -3024,8 +3034,9 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
+    idx = 0;
+    if (radv_graphics_queue_enabled(pdev)) {
+       if (*pCount >= 1) {
+-         VkQueueFlags gfx_flags =
+-            VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
++         /* Sparse binding only where sparse memory is supported. */
++         VkQueueFlags gfx_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT |
++                                  (pdev->info.has_sparse ? VK_QUEUE_SPARSE_BINDING_BIT : 0);
+          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
+             .queueFlags = gfx_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_GENERAL),
+             .queueCount = 1,
+@@ -3037,7 +3048,8 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
+    }
+ 
+    if (radv_compute_queue_enabled(pdev)) {
+-      VkQueueFlags compute_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
++      VkQueueFlags compute_flags =
++         VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | (pdev->info.has_sparse ? VK_QUEUE_SPARSE_BINDING_BIT : 0);
+       if (*pCount > idx) {
+          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
+             .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_COMPUTE),
+diff --git a/src/amd/vulkan/radv_physical_device.h b/src/amd/vulkan/radv_physical_device.h
+index 647976007b1..dfbc14e4a5a 100644
+--- a/src/amd/vulkan/radv_physical_device.h
++++ b/src/amd/vulkan/radv_physical_device.h
+@@ -226,8 +226,9 @@ static inline bool
+ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
+ {
+    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
+-    * VK_DEVICE_TIMELINE_MODE_EMULATED. */
+-   return pdev->info.has_timeline_syncobj &&
++    * VK_DEVICE_TIMELINE_MODE_EMULATED: the winsys's own sync type must be the timeline, which
++    * has_timeline_syncobj alone does not say when timelines are emulated over binary syncs. */
++   return pdev->info.has_timeline_syncobj && (pdev->syncobj_sync_type.features & VK_SYNC_FEATURE_TIMELINE) &&
+           radv_sparse_enabled(pdev);
+ }
+ 
+diff --git a/src/amd/vulkan/radv_queue.c b/src/amd/vulkan/radv_queue.c
+index 059e6935aeb..8f200a4a89a 100644
+--- a/src/amd/vulkan/radv_queue.c
++++ b/src/amd/vulkan/radv_queue.c
+@@ -187,6 +187,17 @@ radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMem
+ static VkResult
+ radv_queue_submit_bind_sparse_memory(struct radv_device *device, struct vk_queue_submit *submission)
+ {
++   const struct radv_physical_device *pdev = radv_device_physical(device);
++
++   /* Where a bind changes the mappings at once, the work the waits stand for
++    * must be done with the old ones first. */
++   if (pdev->info.has_sparse_cpu_binds && submission->wait_count &&
++       (submission->buffer_bind_count || submission->image_opaque_bind_count || submission->image_bind_count)) {
++      VkResult result = vk_sync_wait_many(&device->vk, submission->wait_count, submission->waits, 0, UINT64_MAX);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
+    for (uint32_t i = 0; i < submission->buffer_bind_count; ++i) {
+       VkResult result = radv_sparse_buffer_bind_memory(device, submission->buffer_binds + i);
+       if (result != VK_SUCCESS)
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c b/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
+index 0d6061efb20..ca7292e8840 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_bo.c
+@@ -6,6 +6,7 @@
+ 
+ #include "radv_ps5_winsys.h"
+ 
++#include <inttypes.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -34,20 +35,43 @@ radv_ps5_buffer_create(struct radeon_winsys *rws, uint64_t size, unsigned alignm
+    struct radv_ps5_winsys *const ws = radv_ps5_winsys(rws);
+    *out_bo = NULL;
+ 
+-   /* Sparse buffers need page-table control a title does not have, and a
+-    * buffer cannot be placed at an address an earlier run chose; the physical
+-    * device reports neither (has_sparse_vm_mappings, capture replay). */
+-   if (flags & RADEON_FLAG_VIRTUAL)
+-      return VK_ERROR_FEATURE_NOT_PRESENT;
+-   if (replay_address)
+-      return VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS;
++   /* A sparse resource: a range with nothing bound yet (radv_ps5_vrange_*),
++    * placed for capture and replay as any other buffer is. */
++   if (flags & RADEON_FLAG_VIRTUAL) {
++      struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
++      if (!bo)
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      if (!radv_ps5_vrange_reserve(size, flags & RADEON_FLAG_32BIT,
++                                   (flags & RADEON_FLAG_REPLAYABLE) || replay_address, replay_address,
++                                   &bo->memory)) {
++         free(bo);
++         return replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      }
++      bo->ws = ws;
++      bo->flags = flags;
++      bo->sparse = true;
++      bo->base.va = (uint64_t)(uintptr_t)bo->memory.cpu;
++      bo->base.size = size;
++      bo->base.is_local = true;
++      bo->base.use_global_list = true;
++      bo->base.initial_domain = domain;
++      bo->base.obj_id = p_atomic_inc_return(&radv_ps5_next_obj_id);
++      *out_bo = &bo->base;
++      return VK_SUCCESS;
++   }
++   /* Capture and replay: a captured buffer outside the window goes at the top
++    * of the device-memory region, and a replayed one at its captured address
++    * or nowhere (radv_ps5_memory_alloc_replayable). */
++   const bool window32 = flags & RADEON_FLAG_32BIT;
++   const bool replayable = (flags & RADEON_FLAG_REPLAYABLE) || replay_address;
+ 
+    struct radv_ps5_bo *const bo = calloc(1, sizeof(*bo));
+    if (!bo)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+-   if (!radv_ps5_memory_alloc(size, alignment, flags & RADEON_FLAG_32BIT, &bo->memory)) {
++   if (replayable ? !radv_ps5_memory_alloc_replayable(size, alignment, window32, replay_address, &bo->memory)
++                  : !radv_ps5_memory_alloc(size, alignment, window32, &bo->memory)) {
+       free(bo);
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    bo->ws = ws;
+    bo->flags = flags;
+@@ -85,11 +109,18 @@ radv_ps5_buffer_destroy(struct radeon_winsys *rws, struct radeon_winsys_bo *base
+    struct radv_ps5_bo *const bo = radv_ps5_bo(base);
+    if (!bo)
+       return;
++   if (bo->sparse) {
++      radv_ps5_vrange_release(&bo->memory);
++      free(bo);
++      return;
++   }
+    p_atomic_add(&radv_ps5_allocated_bytes, -(int64_t)bo->memory.bytes);
+    if (bo->base.initial_domain & RADEON_DOMAIN_VRAM)
+       p_atomic_add(&ws->allocated_vram, -(int64_t)bo->memory.bytes);
+    else
+       p_atomic_add(&ws->allocated_gtt, -(int64_t)bo->memory.bytes);
++   if (bo->placed)
++      radv_ps5_memory_unmap_at(bo->placed, bo->memory.bytes, false);
+    radv_ps5_memory_free(&bo->memory);
+    free(bo);
+ }
+@@ -98,19 +129,31 @@ static void *
+ radv_ps5_buffer_map(struct radeon_winsys *rws, struct radeon_winsys_bo *base, bool use_fixed_addr, void *fixed_addr)
+ {
+    (void)rws;
+-   /* A placed mapping would need a second CPU mapping of the memory. */
+-   if (use_fixed_addr)
++   struct radv_ps5_bo *const bo = radv_ps5_bo(base);
++   if (bo->sparse)
+       return NULL;
+-   (void)fixed_addr;
+-   return radv_ps5_bo(base)->memory.cpu;
++   if (!use_fixed_addr)
++      return bo->memory.cpu;
++
++   /* A placed mapping (VK_EXT_map_memory_placed): the same direct memory mapped
++    * again for the CPU, at the address the application chose. The GPU keeps
++    * the first mapping's address. */
++   if (bo->placed || !radv_ps5_memory_map_at(&bo->memory, fixed_addr))
++      return NULL;
++   bo->placed = fixed_addr;
++   return fixed_addr;
+ }
+ 
+ static void
+ radv_ps5_buffer_unmap(struct radeon_winsys *rws, struct radeon_winsys_bo *base, bool replace)
+ {
+    (void)rws;
+-   (void)base;
+-   (void)replace;
++   struct radv_ps5_bo *const bo = radv_ps5_bo(base);
++   /* The first mapping lasts as long as the buffer; only a placed one goes. */
++   if (!bo->placed)
++      return;
++   radv_ps5_memory_unmap_at(bo->placed, bo->memory.bytes, replace);
++   bo->placed = NULL;
+ }
+ 
+ static VkResult
+@@ -176,12 +219,16 @@ radv_ps5_buffer_virtual_bind(struct radeon_winsys *rws, struct radeon_winsys_bo
+                              uint64_t size, struct radeon_winsys_bo *bo, uint64_t bo_offset)
+ {
+    (void)rws;
+-   (void)parent;
+-   (void)offset;
+-   (void)size;
+-   (void)bo;
+-   (void)bo_offset;
+-   return VK_ERROR_FEATURE_NOT_PRESENT;
++   struct radv_ps5_bo *const range = radv_ps5_bo(parent);
++   if (!range->sparse || offset > range->memory.bytes || size > range->memory.bytes - offset)
++      return VK_ERROR_UNKNOWN;
++   uint8_t *const at = (uint8_t *)range->memory.cpu + offset;
++   const bool done = bo ? radv_ps5_vrange_bind(at, size, &radv_ps5_bo(bo)->memory, bo_offset)
++                        : radv_ps5_vrange_unbind(at, size);
++   if (!done)
++      fprintf(stderr, "radv/ps5: sparse %s of %" PRIu64 " bytes at %p failed\n", bo ? "bind" : "unbind", size,
++              (void *)at);
++   return done ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ }
+ 
+ static VkResult
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+index fb5833da836..6cd6d47a665 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+@@ -333,6 +333,54 @@ radv_ps5_completion_words(uint32_t *words, uint64_t marker_address, uint32_t val
+    words[7] = 0;
+ }
+ 
++/* The GPU clock, as a timestamp query reads it: a RELEASE_MEM that writes the
++ * 64-bit 100 MHz counter at the bottom of the pipe (HARDWARE_FINDINGS.md in
++ * PS5_Vulkan, "A readable GPU clock"), submitted alone and waited for. It
++ * lands after whatever the queue still runs, which the caller's CPU clock
++ * readings around it (vkGetCalibratedTimestampsKHR's deviation) include. The
++ * packet and its value live in the marker's page, past the marker. */
++#define RADV_PS5_CLOCK_WORDS_OFFSET 1024
++#define RADV_PS5_CLOCK_VALUE_OFFSET 2048
++
++uint64_t
++radv_ps5_read_gpu_clock(void)
++{
++   /* The model runs no GPU: its clock is the host's, at the same rate. */
++   if (!radv_ps5_platform_runs_gpu())
++      return (uint64_t)os_time_get_nano() / 10;
++   struct radv_ps5_queue *const queue = radv_ps5_queue_get();
++   if (!queue)
++      return 0;
++   uint8_t *const page = (uint8_t *)queue->marker_memory.cpu;
++   uint32_t *const words = (uint32_t *)(page + RADV_PS5_CLOCK_WORDS_OFFSET);
++   volatile uint64_t *const value = (volatile uint64_t *)(page + RADV_PS5_CLOCK_VALUE_OFFSET);
++   const uint64_t va = (uint64_t)(uintptr_t)value;
++
++   simple_mtx_lock(&queue->submit_lock);
++   *value = UINT64_MAX;
++   radv_ps5_cpu_flush((const void *)value, sizeof(*value));
++   words[0] = PKT3(PKT3_RELEASE_MEM, 6, 0);
++   words[1] = EVENT_TYPE(V_028A90_BOTTOM_OF_PIPE_TS) | EVENT_INDEX(5);
++   words[2] = EOP_DATA_SEL(EOP_DATA_SEL_TIMESTAMP);
++   words[3] = (uint32_t)va;
++   words[4] = (uint32_t)(va >> 32);
++   words[5] = 0;
++   words[6] = 0;
++   words[7] = 0;
++   uint64_t clock = 0;
++   if (radv_ps5_submit(words, 8, NULL, 0) == 0) {
++      const int64_t deadline = os_time_get_nano() + INT64_C(1000000000);
++      do {
++         radv_ps5_cpu_flush((const void *)value, sizeof(*value));
++         clock = *value;
++      } while (clock == UINT64_MAX && os_time_get_nano() < deadline);
++      if (clock == UINT64_MAX)
++         clock = 0;
++   }
++   simple_mtx_unlock(&queue->submit_lock);
++   return clock;
++}
++
+ /* Forgets the ring records the GPU has finished with. Called with the submit
+  * lock held. */
+ static void
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index ee26687de1c..42240761d5e 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -85,6 +85,53 @@ radv_ps5_granules_take(struct radv_ps5_granules *g, uint32_t count, uint32_t ali
+    return UINT32_MAX;
+ }
+ 
++static bool
++radv_ps5_granules_free(const struct radv_ps5_granules *g, uint32_t first, uint32_t count)
++{
++   for (uint32_t i = first; i < first + count; i++) {
++      if (g->used[i / 64] & (UINT64_C(1) << (i % 64)))
++         return false;
++   }
++   return true;
++}
++
++/* The same from the top down: where captured buffers go, away from everything
++ * else, so their addresses are still free when a replay asks for them. */
++static uint32_t
++radv_ps5_granules_take_top(struct radv_ps5_granules *g, uint32_t count, uint32_t align_granules)
++{
++   if (count == 0 || count > g->count)
++      return UINT32_MAX;
++   align_granules = MAX2(align_granules, 1);
++   simple_mtx_lock(&g->lock);
++   for (uint32_t start = (g->count - count) / align_granules * align_granules;;
++        start -= align_granules) {
++      if (radv_ps5_granules_free(g, start, count)) {
++         radv_ps5_granules_mark(g, start, count, true);
++         simple_mtx_unlock(&g->lock);
++         return start;
++      }
++      if (start < align_granules)
++         break;
++   }
++   simple_mtx_unlock(&g->lock);
++   return UINT32_MAX;
++}
++
++/* Exactly the granules from first on, if they are all free. */
++static bool
++radv_ps5_granules_take_at(struct radv_ps5_granules *g, uint32_t first, uint32_t count)
++{
++   if (count == 0 || first >= g->count || count > g->count - first)
++      return false;
++   simple_mtx_lock(&g->lock);
++   const bool free = radv_ps5_granules_free(g, first, count);
++   if (free)
++      radv_ps5_granules_mark(g, first, count, true);
++   simple_mtx_unlock(&g->lock);
++   return free;
++}
++
+ static void
+ radv_ps5_granules_give(struct radv_ps5_granules *g, uint32_t first, uint32_t count)
+ {
+@@ -258,6 +305,227 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct
+    return true;
+ }
+ 
++/* A window buffer is replayed where the kernel agrees to put it: at the
++ * captured address given as a hint, if nothing took it since. */
++static bool
++radv_ps5_memory_replay_window(uint64_t bytes, uint64_t alignment, uint64_t replay_va, struct radv_ps5_memory *out)
++{
++   alignment = util_next_power_of_two64(MAX2(alignment, PS5_KERNEL_DIRECT_ALIGNMENT));
++   if (replay_va % alignment || !radv_ps5_window_contains(replay_va, bytes))
++      return false;
++   int64_t physical = -1;
++   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, alignment, RADV_PS5_DIRECT_TYPE,
++                                     &physical) != 0)
++      return false;
++   void *const hint = (void *)(uintptr_t)replay_va;
++   void *address = hint;
++   const int32_t result = sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, 0, physical, alignment);
++   if (result != 0 || address != hint) {
++      if (result == 0 && address != NULL)
++         sceKernelMunmap(address, bytes);
++      sceKernelReleaseDirectMemory(physical, bytes);
++      return false;
++   }
++   *out = (struct radv_ps5_memory){.cpu = address, .bytes = bytes, .physical = physical};
++   return true;
++}
++
++bool
++radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
++                                 struct radv_ps5_memory *out)
++{
++   if (window32 && !replay_va)
++      return radv_ps5_memory_alloc(bytes, alignment, true, out);
++   *out = (struct radv_ps5_memory){.physical = -1};
++   bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
++   if (window32)
++      return radv_ps5_memory_replay_window(bytes, alignment, replay_va, out);
++   alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
++   const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
++   const uint32_t align_granules = (uint32_t)(alignment / RADV_PS5_LARGE_BYTES);
++
++   uint32_t granule;
++   if (replay_va) {
++      if (replay_va < RADV_PS5_REGION_BASE || (replay_va - RADV_PS5_REGION_BASE) % alignment ||
++          (replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES > UINT32_MAX)
++         return false;
++      granule = (uint32_t)((replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES);
++      if (!radv_ps5_granules_take_at(&radv_ps5_region, granule, granules))
++         return false;
++   } else {
++      granule = radv_ps5_granules_take_top(&radv_ps5_region, granules, align_granules);
++      if (granule == UINT32_MAX)
++         return false;
++   }
++
++   int64_t physical = -1;
++   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, alignment, RADV_PS5_DIRECT_TYPE,
++                                     &physical) != 0) {
++      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
++      return false;
++   }
++   /* The address is a hint the kernel takes only where nothing is mapped:
++    * anything else it chose is given back. */
++   void *const hint = (void *)(uintptr_t)(RADV_PS5_REGION_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
++   void *address = hint;
++   const int32_t result = sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, 0, physical, alignment);
++   if (result != 0 || address != hint) {
++      if (result == 0 && address != NULL)
++         sceKernelMunmap(address, bytes);
++      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
++      sceKernelReleaseDirectMemory(physical, bytes);
++      return false;
++   }
++
++   *out = (struct radv_ps5_memory){
++      .cpu = address,
++      .bytes = bytes,
++      .physical = physical,
++      .granule = granule,
++      .granules = granules,
++   };
++   return true;
++}
++
++/* ------------------------------------------------------------ sparse ranges */
++
++/* A sparse resource is a range of the device-memory region. A bound piece is
++ * a buffer's direct memory mapped there at a fixed address; an unbound piece
++ * is the shared zero block, so an access to it neither faults nor reaches any
++ * buffer. What such a read returns is whatever was written there before,
++ * which Vulkan allows without residencyNonResidentStrict. */
++static simple_mtx_t radv_ps5_zero_lock = SIMPLE_MTX_INITIALIZER;
++static int64_t radv_ps5_zero_physical = -1;
++
++static int64_t
++radv_ps5_zero_block(void)
++{
++   simple_mtx_lock(&radv_ps5_zero_lock);
++   if (radv_ps5_zero_physical < 0) {
++      int64_t physical = -1;
++      if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), RADV_PS5_LARGE_BYTES,
++                                        RADV_PS5_LARGE_BYTES, RADV_PS5_DIRECT_TYPE, &physical) == 0) {
++         void *cpu = NULL;
++         if (sceKernelMapDirectMemory(&cpu, RADV_PS5_LARGE_BYTES, RADV_PS5_PROTECTION, 0, physical,
++                                      RADV_PS5_LARGE_BYTES) == 0) {
++            memset(cpu, 0, RADV_PS5_LARGE_BYTES);
++            radv_ps5_cpu_flush(cpu, RADV_PS5_LARGE_BYTES);
++            sceKernelMunmap(cpu, RADV_PS5_LARGE_BYTES);
++            radv_ps5_zero_physical = physical;
++         } else {
++            sceKernelReleaseDirectMemory(physical, RADV_PS5_LARGE_BYTES);
++         }
++      }
++   }
++   const int64_t zero = radv_ps5_zero_physical;
++   simple_mtx_unlock(&radv_ps5_zero_lock);
++   return zero;
++}
++
++static bool
++radv_ps5_map_fixed(uint8_t *at, uint64_t bytes, int64_t physical)
++{
++   void *address = at;
++   return sceKernelMapDirectMemory(&address, bytes, RADV_PS5_PROTECTION, PS5_KERNEL_MAP_FIXED, physical,
++                                   RADV_PS5_PAGE_BYTES) == 0 &&
++          address == at;
++}
++
++bool
++radv_ps5_vrange_unbind(void *at, uint64_t bytes)
++{
++   const int64_t zero = radv_ps5_zero_block();
++   if (zero < 0 || (uintptr_t)at % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
++      return false;
++   for (uint64_t done = 0; done < bytes;) {
++      const uint64_t piece = MIN2(bytes - done, RADV_PS5_LARGE_BYTES);
++      if (!radv_ps5_map_fixed((uint8_t *)at + done, piece, zero))
++         return false;
++      done += piece;
++   }
++   return true;
++}
++
++bool
++radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset)
++{
++   if (memory->physical < 0 || offset > memory->bytes || bytes > memory->bytes - offset ||
++       (uintptr_t)at % RADV_PS5_PAGE_BYTES || offset % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
++      return false;
++   return radv_ps5_map_fixed(at, bytes, memory->physical + (int64_t)offset);
++}
++
++/* A range in the window: a reservation where the kernel puts one it is given
++ * no address for, or at the captured address if nothing took it since, as
++ * window buffers are placed (radv_ps5_memory_alloc). */
++static bool
++radv_ps5_vrange_reserve_window(uint64_t bytes, uint64_t replay_va, struct radv_ps5_memory *out)
++{
++   const uint64_t span = align64(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
++   if (replay_va && (replay_va % RADV_PS5_LARGE_BYTES || !radv_ps5_window_contains(replay_va, span)))
++      return false;
++   void *at = (void *)(uintptr_t)replay_va;
++   if (sceKernelReserveVirtualRange(&at, span, 0, RADV_PS5_LARGE_BYTES) != 0)
++      return false;
++   if ((replay_va && at != (void *)(uintptr_t)replay_va) || !radv_ps5_window_contains((uint64_t)(uintptr_t)at, span) ||
++       !radv_ps5_vrange_unbind(at, span)) {
++      sceKernelMunmap(at, span);
++      return false;
++   }
++   *out = (struct radv_ps5_memory){.cpu = at, .bytes = span, .physical = -1};
++   return true;
++}
++
++bool
++radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
++                        struct radv_ps5_memory *out)
++{
++   *out = (struct radv_ps5_memory){.physical = -1};
++   if (window32)
++      return radv_ps5_vrange_reserve_window(bytes, replay_va, out);
++   const uint32_t granules = (uint32_t)DIV_ROUND_UP(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
++   /* Placed as radv_ps5_memory_alloc_replayable places buffers. */
++   uint32_t granule;
++   if (replay_va) {
++      if (replay_va < RADV_PS5_REGION_BASE || (replay_va - RADV_PS5_REGION_BASE) % RADV_PS5_LARGE_BYTES ||
++          (replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES > UINT32_MAX)
++         return false;
++      granule = (uint32_t)((replay_va - RADV_PS5_REGION_BASE) / RADV_PS5_LARGE_BYTES);
++      if (!radv_ps5_granules_take_at(&radv_ps5_region, granule, granules))
++         return false;
++   } else {
++      granule = replayable ? radv_ps5_granules_take_top(&radv_ps5_region, granules, 1)
++                           : radv_ps5_granules_take(&radv_ps5_region, granules, 1);
++      if (granule == UINT32_MAX)
++         return false;
++   }
++   uint8_t *const va = (uint8_t *)(uintptr_t)(RADV_PS5_REGION_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
++   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
++   if (!radv_ps5_vrange_unbind(va, span)) {
++      sceKernelMunmap(va, span);
++      radv_ps5_granules_give(&radv_ps5_region, granule, granules);
++      return false;
++   }
++   *out = (struct radv_ps5_memory){.cpu = va, .bytes = span, .physical = -1, .granule = granule, .granules = granules};
++   return true;
++}
++
++void
++radv_ps5_vrange_release(struct radv_ps5_memory *range)
++{
++   if (!range->cpu)
++      return;
++   sceKernelMunmap(range->cpu, range->bytes);
++   radv_ps5_granules_give(&radv_ps5_region, range->granule, range->granules);
++   *range = (struct radv_ps5_memory){.physical = -1};
++}
++
++uint64_t
++radv_ps5_vrange_space_bytes(void)
++{
++   return RADV_PS5_REGION_BYTES;
++}
++
+ void
+ radv_ps5_memory_free(struct radv_ps5_memory *memory)
+ {
+@@ -303,6 +571,34 @@ radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
+    return sceAgcDriverSetHsOffchipParam(granularity, buffering);
+ }
+ 
++bool
++radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
++{
++   if (memory->physical < 0)
++      return false;
++   void *at = address;
++   const int32_t result = sceKernelMapDirectMemory(&at, memory->bytes, PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE,
++                                                   PS5_KERNEL_MAP_FIXED, memory->physical, PS5_KERNEL_PAGE_SIZE);
++   if (result == 0 && at != address) {
++      sceKernelMunmap(at, memory->bytes);
++      return false;
++   }
++   return result == 0;
++}
++
++void
++radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
++{
++   if (reserve) {
++      /* A reservation laid over the mapping replaces it, as a fixed mapping does. */
++      void *at = address;
++      if (sceKernelReserveVirtualRange(&at, bytes, PS5_KERNEL_MAP_FIXED, PS5_KERNEL_PAGE_SIZE) == 0 && at == address)
++         return;
++      fprintf(stderr, "radv/ps5: a placed mapping at %p could not be left reserved\n", address);
++   }
++   sceKernelMunmap(address, bytes);
++}
++
+ #else
+ 
+ /* --------------------------------------------------------------- host model */
+@@ -327,6 +623,19 @@ radv_ps5_platform_once(void)
+                                            RADV_PS5_WINDOW_GRANULE);
+ }
+ 
++/* The Vulkan loader may unload the driver once its instances are gone and load
++ * it again (the CTS does): the window goes with the library, or the next load
++ * finds it taken. */
++static void __attribute__((destructor))
++radv_ps5_platform_unload(void)
++{
++   if (!radv_ps5_ready)
++      return;
++   munmap((void *)(uintptr_t)RADV_PS5_WINDOW_BASE, RADV_PS5_WINDOW_BYTES);
++   free(radv_ps5_window.used);
++   simple_mtx_destroy(&radv_ps5_window.lock);
++}
++
+ bool
+ radv_ps5_platform_runs_gpu(void)
+ {
+@@ -382,6 +691,82 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct
+    return true;
+ }
+ 
++bool
++radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
++                                 struct radv_ps5_memory *out)
++{
++   if (!replay_va)
++      return radv_ps5_memory_alloc(bytes, alignment, window32, out);
++   *out = (struct radv_ps5_memory){.physical = -1};
++   bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
++   if (window32) {
++      const uint32_t count = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_WINDOW_GRANULE);
++      if (!radv_ps5_window_contains(replay_va, bytes) || (replay_va - RADV_PS5_WINDOW_BASE) % RADV_PS5_WINDOW_GRANULE)
++         return false;
++      const uint32_t first = (uint32_t)((replay_va - RADV_PS5_WINDOW_BASE) / RADV_PS5_WINDOW_GRANULE);
++      if (!radv_ps5_granules_take_at(&radv_ps5_window, first, count))
++         return false;
++      uint8_t *const cpu = (uint8_t *)(uintptr_t)replay_va;
++      const uint64_t span = (uint64_t)count * RADV_PS5_WINDOW_GRANULE;
++      if (mprotect(cpu, span, PROT_READ | PROT_WRITE) != 0) {
++         radv_ps5_granules_give(&radv_ps5_window, first, count);
++         return false;
++      }
++      *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = span, .physical = -1, .granule = first, .granules = count};
++      return true;
++   }
++   if (replay_va % RADV_PS5_PAGE_BYTES)
++      return false;
++   void *const cpu = mmap((void *)(uintptr_t)replay_va, bytes, PROT_READ | PROT_WRITE,
++                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
++   if (cpu == MAP_FAILED)
++      return false;
++   if (cpu != (void *)(uintptr_t)replay_va) {
++      munmap(cpu, bytes);
++      return false;
++   }
++   *out = (struct radv_ps5_memory){.cpu = cpu, .bytes = bytes, .physical = -1};
++   return true;
++}
++
++/* Sparse ranges in the model: plain memory, which binds leave alone (the
++ * model runs no GPU work to read through them). */
++bool
++radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
++                        struct radv_ps5_memory *out)
++{
++   const uint64_t span = align64(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
++   return replayable ? radv_ps5_memory_alloc_replayable(span, RADV_PS5_LARGE_BYTES, window32, replay_va, out)
++                     : radv_ps5_memory_alloc(span, RADV_PS5_LARGE_BYTES, window32, out);
++}
++
++void
++radv_ps5_vrange_release(struct radv_ps5_memory *range)
++{
++   radv_ps5_memory_free(range);
++}
++
++bool
++radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset)
++{
++   (void)at;
++   return offset <= memory->bytes && bytes <= memory->bytes - offset;
++}
++
++bool
++radv_ps5_vrange_unbind(void *at, uint64_t bytes)
++{
++   (void)at;
++   (void)bytes;
++   return true;
++}
++
++uint64_t
++radv_ps5_vrange_space_bytes(void)
++{
++   return UINT64_C(256) << 30;
++}
++
+ void
+ radv_ps5_memory_free(struct radv_ps5_memory *memory)
+ {
+@@ -403,7 +788,8 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
+    (void)words;
+    (void)count;
+    /* Nothing runs the words on a PC; the submission completes at once. */
+-   *marker = marker_value;
++   if (marker)
++      *marker = marker_value;
+    return 0;
+ }
+ 
+@@ -423,6 +809,23 @@ radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
+    return 0;
+ }
+ 
++bool
++radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address)
++{
++   /* The host model's memory is anonymous: nothing maps it twice. */
++   (void)memory;
++   (void)address;
++   return false;
++}
++
++void
++radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve)
++{
++   (void)address;
++   (void)bytes;
++   (void)reserve;
++}
++
+ #endif
+ 
+ bool
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 764f4cfd4de..42379832d6e 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -59,6 +59,25 @@ bool radv_ps5_platform_runs_gpu(void);
+ bool radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32,
+                            struct radv_ps5_memory *out);
+ void radv_ps5_memory_free(struct radv_ps5_memory *memory);
++/* Memory for capture and replay. A capture outside the window goes at the
++ * top of the device-memory region, away from everything else; a replay goes
++ * at replay_va exactly or not at all (in the window, where the kernel places
++ * buffers, only if nothing took the address since). */
++bool radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
++                                      struct radv_ps5_memory *out);
++
++/* Sparse resources: a range reserved in the device-memory region, or in the
++ * window for one the shaders reach through a 32-bit pointer (a descriptor
++ * buffer), unbound (the shared zero block) until pieces of a buffer's memory
++ * are bound into it. Addresses, sizes and offsets are whole pages. */
++/* Placed for capture and replay as radv_ps5_memory_alloc_replayable places
++ * buffers when replayable or replay_va is set. */
++bool radv_ps5_vrange_reserve(uint64_t bytes, bool window32, bool replayable, uint64_t replay_va,
++                             struct radv_ps5_memory *out);
++void radv_ps5_vrange_release(struct radv_ps5_memory *range);
++bool radv_ps5_vrange_bind(void *at, uint64_t bytes, const struct radv_ps5_memory *memory, uint64_t offset);
++bool radv_ps5_vrange_unbind(void *at, uint64_t bytes);
++uint64_t radv_ps5_vrange_space_bytes(void);
+ 
+ /* The direct-memory pool, which the CPU draws on too, and what it has left. */
+ uint64_t radv_ps5_memory_pool_bytes(void);
+@@ -75,6 +94,12 @@ int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker,
+ /* The tessellation factor ring the GPU uses from the next submission on (AGC
+  * owns its registers); 0 or the system software's error. */
+ int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);
++
++/* Maps memory's direct memory a second time for the CPU, at address, replacing
++ * whatever the range held (a placed mapping). */
++bool radv_ps5_memory_map_at(const struct radv_ps5_memory *memory, void *address);
++/* Undoes it, leaving the range reserved if reserve is set. */
++void radv_ps5_memory_unmap_at(void *address, uint64_t bytes, bool reserve);
+ /* VGT_HS_OFFCHIP_PARAM's fields for the next submissions (AGC owns it too);
+  * 0 or the system software's error. */
+ int radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering);
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index d7442f2650b..7238bcc54d5 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -14,7 +14,6 @@
+ #include "addrlib/src/amdgpu_asic_addr.h"
+ #include "tools/radv_debug.h"
+ #include "util/os_time.h"
+-#include "util/u_debug.h"
+ #include "util/u_atomic.h"
+ #include "util/u_math.h"
+ #include "ac_linux_drm.h"
+@@ -142,29 +141,30 @@ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs
+  * compute units of 40) and the render-backend layout. Probe S3 measures them;
+  * until then they only size scratch and a few hardware limits. */
+ #define RADV_PS5_EXTERNAL_REV 0x28 /* the NAVI21 range: GFX10.3 */
+-/* GFX1013's range: AddrLib's non-RB+ GFX10 swizzles, with the depth/stencil
+- * mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
+- * mips was laid out in three 64 KiB blocks, its 128x128 level in the mip
+- * tail, while the depth block wrote level 0 into a fourth (a write past the
+- * image: dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*). */
+-#define RADV_PS5_ADDRLIB_REV 0x82
++/* The revision of the GC 10.1.3 model (radv_ps5_take_gc_10_1_3_traits): the
++ * start of GFX1013's range. */
++#define RADV_PS5_GFX1013_REV 0x82
+ #define RADV_PS5_GB_ADDR_CONFIG 0x00100044
+ 
++/* A GFX10 GPU with the console's units, clocks and memory, as the amdgpu
++ * kernel would report it and ac_gpu_info completes it; the IP version and the
++ * revision decide which GFX10 it is. */
+ static void
+-radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
++radv_ps5_fill_info(struct radeon_info *info, bool compiler_compat_mode, uint32_t ip_minor,
++                   uint32_t ip_discovery_version, uint32_t external_rev)
+ {
+    const struct drm_amdgpu_info_hw_ip gfx_ip = {
+       .hw_ip_version_major = 10,
+-      .hw_ip_version_minor = 3,
++      .hw_ip_version_minor = ip_minor,
+       .ib_start_alignment = 32,
+       .ib_size_alignment = 32,
+       .available_rings = 0x1,
+-      .ip_discovery_version = 0xa0300,
++      .ip_discovery_version = ip_discovery_version,
+    };
+    struct drm_amdgpu_info_device dev = {
+       .device_id = 0,
+       .chip_rev = 0,
+-      .external_rev = RADV_PS5_EXTERNAL_REV,
++      .external_rev = external_rev,
+       .family = FAMILY_NV,
+       /* Provisional until S3. */
+       .num_shader_engines = 2,
+@@ -219,7 +219,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    ac_fill_hw_ip_info(info, &dev, AMD_IP_GFX, &gfx_ip);
+    info->ip[AMD_IP_GFX].num_instances = 1;
+    ac_identify_chip(info, &dev);
+-   snprintf(info->marketing_name, sizeof(info->marketing_name), "PlayStation 5 GPU");
+    ac_fill_memory_info(info, &dev, &memory);
+    ac_fill_hw_info(info, &dev);
+    ac_fill_tiling_info(info, &gpu_info);
+@@ -227,44 +226,100 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    ac_fill_bug_info(info);
+    ac_fill_tess_info(info);
+    ac_fill_compiler_info(info, &dev, compiler_compat_mode);
+-   /* The integer dot-product instructions do not compute what they should
+-    * here: NGG's workgroup repack sums its counts with v_dot4_u32_u8, and
+-    * with it a geometry shader whose vertex count is not constant, and a
+-    * tessellated patch that NGG culling repacked, drew nothing. Without
+-    * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
+-    * RADV smoke title's geometry and tessellation checks). */
+-   info->compiler_info.has_accelerated_dot_product = false;
++}
++
++/* The GPU's fixed-function blocks are GC 10.1.3's, the chip of the AMD BC-250
++ * (Mesa's CHIP_GFX1013, "GFX10 plus ray tracing instructions"; upstream amdgpu
++ * programs it as GC 10.1.3 with the GB_ADDR_CONFIG above), while register
++ * programming and the shader core behave as GFX10.3's, the identity RADV gets.
++ * So these traits come from Mesa's GFX1013 model, derived from the same inputs.
++ * Each was first found on the console as a symptom (PS5_Vulkan RADV_PHASE.md,
++ * 2026-09-27, has the audit), and the model gives every one of them; the
++ * assertion keeps the model and the measurements in step across Mesa updates.
++ *
++ * - No accelerated dot products: v_dot4_u32_u8 does not compute here. NGG's
++ *   workgroup repack sums its counts with it, and a geometry shader whose
++ *   vertex count is not constant, or a tessellated patch NGG culling repacked,
++ *   drew nothing; with the v_msad_u8 fallback both draw every texel (the RADV
++ *   smoke title's geometry and tessellation checks).
++ * - No GFX10.3 wave ID in TG_SIZE: a 128-invocation workgroup of wave64
++ *   reported one subgroup where two ran
++ *   (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size); bits 20-24
++ *   read 0, and the ordered wave ID serves instead.
++ * - No per-primitive NGG parameters: a fragment shader reading gl_PrimitiveID
++ *   that no earlier stage writes read 0 behind an NGG vertex shader
++ *   (dEQP-VK.pipeline.*.misc.implicit_primitive_id; the smoke title's
++ *   primitive ID check).
++ * - No strict vertex order: the second of two triangles read its per-vertex
++ *   inputs rotated with or without ROTATE_PC_PTR, so
++ *   VK_KHR_fragment_shader_barycentric is not reported (the smoke title's
++ *   barycentric pair; dEQP-VK.fragment_shading_barycentric.data).
++ * - No variable-rate shading: a 2x2 pipeline rate ran the fragment shader once
++ *   a texel and read gl_ShadingRateEXT as 1x1 (the smoke title's shading-rate
++ *   check; dEQP-VK.fragment_shading_rate), so VK_KHR_fragment_shading_rate is
++ *   not reported. No RB+ either.
++ * - No E5B9G9R9 colour target: every blit into it with a non-zero colour read
++ *   back wrong (dEQP-VK.api.copy_and_blit.*.blit_image.all_formats.color.*.
++ *   e5b9g9r9_ufloat_pack32, 500 cases).
++ * - The TC-compatible HTILE clear bug: a depth-only image cleared to 0 read back
++ *   1 after a draw whose fragments were all discarded
++ *   (dEQP-VK.dynamic_state.*.discard.depth); its workaround sets
++ *   ZRANGE_PRECISION 0 after a clear to 0.
++ * - GFX1013's AddrLib revision: non-RB+ GFX10 swizzles with the depth/stencil
++ *   mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
++ *   mips was laid out in three 64 KiB blocks, its 128x128 level in the mip tail,
++ *   while the depth block wrote level 0 into a fourth
++ *   (dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*).
++ *
++ * GFX1013's model differs from GFX10.3 in more than these; the rest is not
++ * taken until measured here (the audit lists them). */
++static void
++radv_ps5_take_gc_10_1_3_traits(struct radeon_info *info, bool compiler_compat_mode)
++{
++   struct radeon_info model;
++   radv_ps5_fill_info(&model, compiler_compat_mode, 1, 0xa0103, RADV_PS5_GFX1013_REV);
++   assert(model.family == CHIP_GFX1013);
++
++   info->compiler_info.has_accelerated_dot_product = model.compiler_info.has_accelerated_dot_product;
++   info->compiler_info.has_cs_wave_id = model.compiler_info.has_cs_wave_id;
++   info->compiler_info.has_ngg_per_prim_params = model.compiler_info.has_ngg_per_prim_params;
++   info->has_ps_strict_vertex_order = model.has_ps_strict_vertex_order;
++   info->has_vrs = model.has_vrs;
++   info->rbplus_allowed = model.rbplus_allowed;
++   info->has_rgb9e5_color_target = model.has_rgb9e5_color_target;
++   info->has_htile_tc_z_clear_bug_without_stencil = model.has_htile_tc_z_clear_bug_without_stencil;
++   info->has_htile_tc_z_clear_bug_with_stencil = model.has_htile_tc_z_clear_bug_with_stencil;
++   info->chip_external_rev = model.chip_external_rev;
++
++   assert(!info->compiler_info.has_accelerated_dot_product && !info->compiler_info.has_cs_wave_id &&
++          !info->compiler_info.has_ngg_per_prim_params && !info->has_ps_strict_vertex_order && !info->has_vrs &&
++          !info->rbplus_allowed && !info->has_rgb9e5_color_target && info->has_htile_tc_z_clear_bug_without_stencil &&
++          info->has_htile_tc_z_clear_bug_with_stencil && info->chip_external_rev == RADV_PS5_GFX1013_REV);
++}
++
++static void
++radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
++{
++   radv_ps5_fill_info(info, compiler_compat_mode, 3, 0xa0300, RADV_PS5_EXTERNAL_REV);
++   snprintf(info->marketing_name, sizeof(info->marketing_name), "PlayStation 5 GPU");
++   radv_ps5_take_gc_10_1_3_traits(info, compiler_compat_mode);
++
++   /* What the platform, not the chip, rules out. */
+    /* Every wave of a shader using scratch_* instructions faulted (MEMVIOL) a
+     * few instructions in, where it had set FLAT_SCRATCH with s_setreg; the
+     * same shaders through buffer instructions, as on GFX8, run (the smoke
+     * title's scratch checks, graphicsfuzz's large private arrays). */
+    info->compiler_info.has_flat_scratch = false;
+-   /* A 128-invocation workgroup of wave64 reported one subgroup where two ran
+-    * (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size): TG_SIZE's
+-    * GFX10.3 wave ID (bits 20-24) reads 0, as on GFX10.1, whose ordered wave
+-    * ID serves instead. */
+-   info->compiler_info.has_cs_wave_id = false;
+-   /* A fragment shader reading gl_PrimitiveID that no earlier stage writes read
+-    * 0 for every primitive behind an NGG vertex shader, which exports it as a
+-    * per-primitive parameter on GFX10.3 (dEQP-VK.pipeline.*.misc.
+-    * implicit_primitive_id; the RADV smoke title's primitive ID check). The
+-    * legacy vertex shader's per-vertex ID read 0 and 1 as it should; the
+-    * parameter cache is GFX10.1's, so the ID goes per vertex here too. */
+-   info->compiler_info.has_ngg_per_prim_params = false;
+-   /* Every acceleration structure build faulted the GPU (a write to an
+-    * unmapped page far past every buffer the process had, even for an empty
+-    * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
+-    * and host builds are not offered, so no ray tracing is reported until the
+-    * build runs. RADV_PS5_RAY_TRACING=1 reports it anyway, to probe the
+-    * build. */
+-   info->compiler_info.has_image_bvh_intersect_ray = debug_get_bool_option("RADV_PS5_RAY_TRACING", false);
+-
+-   /* What the console's layout needs beyond the NAVI21 defaults. */
+-   info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
++   /* The BVH instruction is GFX10.3's (and GC 10.1.3's): acceleration
++    * structures build and ray queries traverse them (dEQP-VK.ray_query and
++    * the ray query cases elsewhere, run rq-full-1 in PS5_Vulkan), so the
++    * description keeps it. */
++
+    /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
+-    * RADV_DEBUG=nongg: 31 of 33 cases), and neither AGC library exports a
+-    * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
+-    * tessellation factor ring. */
++    * RADV_DEBUG=nongg: 31 of 33 cases). Why is not established: RADV sets the
++    * GS ring sizes with a UCONFIG write, as it does everywhere, while the
++    * tessellation rings are AGC's (sceAgcDriverSetTFRing); whether the GS
++    * ring sizes are too is unmeasured. */
+    info->has_legacy_gs = false;
+    /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
+     * the command buffers device-generated commands write cannot run. */
+@@ -274,29 +329,6 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * lock VK_KHR_performance_query takes always failed
+     * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
+    info->has_perf_counters = false;
+-   /* The second of two triangles read its per-vertex inputs rotated, (v5, v3,
+-    * v4) for (v3, v4, v5), with or without ROTATE_PC_PTR: this GPU's
+-    * parameter cache is GFX10.1's, which upstream RADV does not report
+-    * VK_KHR_fragment_shader_barycentric for (the RADV smoke title's
+-    * barycentric pair; dEQP-VK.fragment_shading_barycentric.data, triangles). */
+-   info->has_ps_strict_vertex_order = false;
+-   /* A triangle over a 256x256 target drawn at a 2x2 pipeline shading rate
+-    * ran its fragment shader 65536 times, once a texel, and every invocation
+-    * read gl_ShadingRateEXT as 1x1 (the RADV smoke title's shading-rate
+-    * check); dEQP-VK.fragment_shading_rate failed every case whose combined
+-    * rate is coarser than 1x1, from the pipeline, the primitive or an
+-    * attachment. The rasterizer is GFX10.1's, without variable-rate shading,
+-    * so VK_KHR_fragment_shading_rate is not reported. */
+-   info->has_vrs = false;
+-   info->rbplus_allowed = false;
+-   /* A depth-only image cleared to 0 read back 1 after a draw whose
+-    * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
+-    * with RADV_DEBUG=nohiz or nofastclears it passed): the TC-compatible
+-    * HTILE clear bug Mesa records for GFX8 and GFX1013 (the BC-250, whose
+-    * missing dot products this GPU shares too). This turns on its
+-    * workaround, ZRANGE_PRECISION 0 after a clear to 0. */
+-   info->has_htile_tc_z_clear_bug_without_stencil = true;
+-   info->has_htile_tc_z_clear_bug_with_stencil = true;
+    info->has_dedicated_vram = true;
+    info->all_vram_visible = true;
+    info->address32_hi = RADV_PS5_ADDRESS32_HI;
+@@ -304,24 +336,29 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * (vk_sync_timeline), with threaded submission for waits before signals. */
+    info->has_timeline_syncobj = true;
+    info->kernel_has_modifiers = false;
+-   info->has_sparse = false;
+-   /* A buffer lives where the platform's direct-memory allocator puts it, and
+-    * radv_ps5_buffer_create refuses a replay address, so no capture and
+-    * replay feature can hold: dEQP-VK.binding_model.buffer_device_address's
+-    * replay cases (723) all failed while bufferDeviceAddressCaptureReplay was
+-    * reported. */
+-   info->has_replayable_va = false;
+-   info->has_sparse_image_3d = false;
++   /* Sparse resources are ranges of the device-memory region whose pages the
++    * winsys maps to buffers as they are bound, and to a shared zero block
++    * while they are not (radv_ps5_vrange_*). No exported function sets the
++    * page table's PRT bits, so an unbound page is not known to read zero or
++    * to report itself non-resident; and a bind is a mapping change made at
++    * once, after the submission's waits. */
++   info->has_sparse = true;
++   info->has_sparse_prt = false;
++   info->has_sparse_cpu_binds = true;
++   info->max_sparse_va_bytes = radv_ps5_vrange_space_bytes();
++   /* A captured buffer can be placed at its address again
++    * (radv_ps5_memory_alloc_replayable); before that, every replay case of
++    * dEQP-VK.binding_model.buffer_device_address (723) failed. Outside the
++    * shaders' window captures keep clear of every other buffer; in it the
++    * kernel places buffers, so a replay there holds only if nothing took the
++    * address since, which the ray tracing pipelines' shader handles (whole
++    * shader arenas) cannot count on. */
++   info->has_replayable_va = true;
++   info->has_replayable_va_32bit = false;
+    info->has_vm_always_valid = true;
+    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be
+     * made visible to the GPU is a probe still to run. */
+    info->has_userptr = false;
+-   /* The shaders are GFX10.3's but the colour block renders E5B9G9R9 wrong:
+-    * every blit into it with a non-zero colour read back incorrect
+-    * (dEQP-VK.api.copy_and_blit.*.blit_image.all_formats.color.*.
+-    * e5b9g9r9_ufloat_pack32, 500 cases), while the zero colours of an
+-    * a8_unorm source passed. */
+-   info->has_rgb9e5_color_target = false;
+    info->max_submitted_ibs[AMD_IP_GFX] = 1;
+ 
+    /* ac_query_gpu_info's own derivations, which have no kernel input. */
+@@ -378,8 +415,10 @@ radv_ps5_winsys_query_value(struct radeon_winsys *rws, enum radeon_value_id valu
+    case RADEON_ALLOCATED_GTT:
+    case RADEON_GTT_USAGE:
+       return p_atomic_read(&ws->allocated_gtt);
++   case RADEON_TIMESTAMP:
++      return radv_ps5_read_gpu_clock();
+    default:
+-      /* The console's clocks and counters are not the title's to read. */
++      /* The console's other clocks and counters are not the title's to read. */
+       return 0;
+    }
+ }
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+index 457f0899515..5f198a8858f 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+@@ -71,6 +71,9 @@ struct radv_ps5_queue {
+ /* The process's queue, created by the first winsys; NULL if it cannot be. */
+ struct radv_ps5_queue *radv_ps5_queue_get(void);
+ 
++/* The GPU's timestamp clock, read through the queue; 0 if it cannot be. */
++uint64_t radv_ps5_read_gpu_clock(void);
++
+ struct radv_ps5_winsys {
+    struct radeon_winsys base;
+    struct radeon_info info;
+@@ -94,6 +97,12 @@ struct radv_ps5_bo {
+    struct radv_ps5_memory memory;
+    enum radeon_bo_flag flags;
+    struct radeon_bo_metadata metadata;
++   /* A second CPU mapping at an address the application chose
++    * (VK_EXT_map_memory_placed), or NULL. */
++   void *placed;
++   /* A sparse resource's range (RADEON_FLAG_VIRTUAL): memory is the reserved
++    * range, and buffers are bound into it. */
++   bool sparse;
+ };
+ 
+ static inline struct radv_ps5_bo *
+diff --git a/src/vulkan/runtime/vk_device.c b/src/vulkan/runtime/vk_device.c
+index 1b422dc8a6c..67cc61ca1e5 100644
+--- a/src/vulkan/runtime/vk_device.c
++++ b/src/vulkan/runtime/vk_device.c
+@@ -877,13 +877,15 @@ vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
+       clockid = CLOCK_MONOTONIC;
+       break;
+    case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
+-      /* The "RAW" clocks on Linux are called "FAST" on FreeBSD */
++      /* The domain is defined as clock_gettime(CLOCK_MONOTONIC_RAW). FreeBSD's
++       * CLOCK_MONOTONIC_FAST is not that clock but CLOCK_MONOTONIC at tick
++       * granularity, which reads behind a precise reading taken before it (a
++       * FreeBSD-based console: dEQP-VK.pipeline.*.timestamp.calibrated.
++       * host_domain_test), so without CLOCK_MONOTONIC_RAW the domain is not
++       * offered. */
+ #if defined(CLOCK_MONOTONIC_RAW)
+       clockid = CLOCK_MONOTONIC_RAW;
+       break;
+-#elif defined(CLOCK_MONOTONIC_FAST)
+-      clockid = CLOCK_MONOTONIC_FAST;
+-      break;
+ #else
+       FALLTHROUGH;
+ #endif

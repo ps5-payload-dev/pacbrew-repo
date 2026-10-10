@@ -1,0 +1,883 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:42 +0000
+Subject: [PATCH] radv: threaded command buffer recording
+ (RADV_THREADED_RECORDING=1)
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  d0d7325e447 radv: threaded recording (RADV_THREADED_RECORDING=1)
+  c1b7f05665c radv: the threaded layer's generated commands find its header
+  2dc8c542e5d radv: the threaded layer drops what resets and frees would record, and destroys wait for the worker
+  504adad77f9 radv: the threaded layer's worker starts after what a failed device creation takes apart
+---
+ src/amd/vulkan/layers/meson.build             |  12 +
+ src/amd/vulkan/layers/radv_threaded_layer.c   | 447 ++++++++++++++++++
+ src/amd/vulkan/layers/radv_threaded_layer.h   |  52 ++
+ .../vulkan/layers/radv_threaded_layer_gen.py  | 174 +++++++
+ src/amd/vulkan/meson.build                    |   7 +-
+ src/amd/vulkan/radv_cmd_buffer.h              |   7 +
+ src/amd/vulkan/radv_device.c                  |  18 +-
+ src/amd/vulkan/radv_device.h                  |   7 +
+ 8 files changed, 721 insertions(+), 3 deletions(-)
+ create mode 100644 src/amd/vulkan/layers/radv_threaded_layer.c
+ create mode 100644 src/amd/vulkan/layers/radv_threaded_layer.h
+ create mode 100644 src/amd/vulkan/layers/radv_threaded_layer_gen.py
+
+diff --git a/src/amd/vulkan/layers/meson.build b/src/amd/vulkan/layers/meson.build
+index e98288c2b58..5f576e42397 100644
+--- a/src/amd/vulkan/layers/meson.build
++++ b/src/amd/vulkan/layers/meson.build
+@@ -12,3 +12,15 @@ radv_annotate_layer = custom_target(
+   ],
+   depend_files : [files('radv_annotate_layer_gen.py'), vk_dispatch_table_gen_depend_files],
+ )
++
++radv_threaded_layer = custom_target(
++  'radv_threaded',
++  input : [files('radv_threaded_layer_gen.py'), vk_api_xml],
++  output : ['radv_threaded_layer_cmds.c'],
++  command : [
++    prog_python, '@INPUT0@', '--xml', '@INPUT1@',
++    '--out-c', '@OUTPUT0@',
++    '--beta', with_vulkan_beta.to_string(),
++  ],
++  depend_files : [files('radv_threaded_layer_gen.py'), vk_dispatch_table_gen_depend_files, vk_cmd_queue_gen_depend_files],
++)
+diff --git a/src/amd/vulkan/layers/radv_threaded_layer.c b/src/amd/vulkan/layers/radv_threaded_layer.c
+new file mode 100644
+index 00000000000..7a7e3a2082d
+--- /dev/null
++++ b/src/amd/vulkan/layers/radv_threaded_layer.c
+@@ -0,0 +1,447 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Threaded recording (radv_threaded_layer.h). The application's thread queues
++ * commands on the command buffer's vk_cmd_queue (the generated threaded_Cmd*
++ * entrypoints, radv_threaded_layer_gen.py); at kick points it moves what is
++ * queued into a batch for the device's worker, which records the batch into
++ * the command buffer through the layer's own dispatch table (the rest of
++ * RADV). A command buffer is only ever recorded by one thread at a time: the
++ * worker while it has batches of it, the application's thread otherwise
++ * (vkBeginCommandBuffer, vkEndCommandBuffer, resets and frees, and the few
++ * commands the layer records directly, all wait for the worker first).
++ *
++ * What the queue copies is what a command's arguments point to, not the
++ * objects they name. The application may destroy one of those while the
++ * command buffer records (the command buffer becomes invalid, and only a
++ * reset, a begin or a free is left to it), so every destroy and free first
++ * waits for the batches handed to the worker before it, and resets, begins
++ * and frees drop what is still queued instead of recording it. */
++
++#include "radv_threaded_layer.h"
++
++#include "radv_cmd_buffer.h"
++#include "radv_device.h"
++#include "radv_entrypoints.h"
++
++#include "util/list.h"
++#include "util/os_misc.h"
++#include "util/u_atomic.h"
++#include "c11/threads.h"
++#include "vk_cmd_queue.h"
++#include "vk_command_pool.h"
++
++/* Queued commands a kick point hands over; fewer wait for the next one. */
++#define RADV_THREADED_KICK_COMMANDS 48
++/* Queued commands handed over whatever the command. */
++#define RADV_THREADED_MAX_COMMANDS 512
++/* How long the worker looks for more work before it sleeps. */
++#define RADV_THREADED_SPIN_NS 50000
++
++struct radv_threaded_batch {
++   struct list_head link;
++   struct list_head cmds;
++   struct radv_cmd_buffer *cmd_buffer;
++};
++
++struct radv_threaded_recorder {
++   mtx_t lock;
++   cnd_t work;
++   cnd_t done;
++   struct list_head batches;
++   uint64_t kicked;   /* batches handed over so far */
++   uint64_t recorded; /* of those, the ones recorded (in order: one worker) */
++   uint32_t barriers; /* threads waiting in radv_threaded_barrier */
++   uint32_t queued;   /* batches waiting, read without the lock while spinning */
++   bool sleeping;     /* the worker waits on work */
++   bool stop;
++   thrd_t thread;
++};
++
++static thread_local bool radv_threaded_on_worker;
++
++bool
++radv_threaded_recording_enabled(void)
++{
++   return os_get_option("RADV_THREADED_RECORDING") && atoi(os_get_option("RADV_THREADED_RECORDING")) != 0;
++}
++
++bool
++radv_threaded_replaying(void)
++{
++   return radv_threaded_on_worker;
++}
++
++static uint64_t
++radv_threaded_now_ns(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static int
++radv_threaded_worker(void *opaque)
++{
++   struct radv_device *device = opaque;
++   struct radv_threaded_recorder *rec = device->threaded;
++   radv_threaded_on_worker = true;
++
++   mtx_lock(&rec->lock);
++   for (;;) {
++      if (list_is_empty(&rec->batches)) {
++         if (rec->stop)
++            break;
++
++         /* Look for more for a while before sleeping: the application's thread
++          * hands over batches every few draws and waking a sleeper costs it. */
++         mtx_unlock(&rec->lock);
++         const uint64_t until = radv_threaded_now_ns() + RADV_THREADED_SPIN_NS;
++         while (!p_atomic_read(&rec->queued) && radv_threaded_now_ns() < until)
++            __builtin_ia32_pause();
++         mtx_lock(&rec->lock);
++
++         if (list_is_empty(&rec->batches) && !rec->stop) {
++            rec->sleeping = true;
++            cnd_wait(&rec->work, &rec->lock);
++            rec->sleeping = false;
++         }
++         continue;
++      }
++
++      struct radv_threaded_batch *batch = list_first_entry(&rec->batches, struct radv_threaded_batch, link);
++      list_del(&batch->link);
++      p_atomic_dec(&rec->queued);
++      mtx_unlock(&rec->lock);
++
++      struct radv_cmd_buffer *cmd_buffer = batch->cmd_buffer;
++      struct vk_cmd_queue queue = {0};
++      list_replace(&batch->cmds, &queue.cmds);
++      vk_cmd_queue_execute(&queue, radv_cmd_buffer_to_handle(cmd_buffer), &device->layer_dispatch.threaded);
++
++      mtx_lock(&rec->lock);
++      rec->recorded++;
++      if (p_atomic_dec_zero(&cmd_buffer->threaded.pending) || rec->barriers)
++         cnd_broadcast(&rec->done);
++   }
++   mtx_unlock(&rec->lock);
++   return 0;
++}
++
++VkResult
++radv_threaded_device_init(struct radv_device *device)
++{
++   struct radv_threaded_recorder *rec =
++      vk_zalloc(&device->vk.alloc, sizeof(*rec), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   if (!rec)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   mtx_init(&rec->lock, mtx_plain);
++   cnd_init(&rec->work);
++   cnd_init(&rec->done);
++   list_inithead(&rec->batches);
++   device->threaded = rec;
++
++   if (thrd_create(&rec->thread, radv_threaded_worker, device) != thrd_success) {
++      device->threaded = NULL;
++      mtx_destroy(&rec->lock);
++      cnd_destroy(&rec->work);
++      cnd_destroy(&rec->done);
++      vk_free(&device->vk.alloc, rec);
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   return VK_SUCCESS;
++}
++
++void
++radv_threaded_device_finish(struct radv_device *device)
++{
++   struct radv_threaded_recorder *rec = device->threaded;
++   if (!rec)
++      return;
++
++   mtx_lock(&rec->lock);
++   rec->stop = true;
++   cnd_signal(&rec->work);
++   mtx_unlock(&rec->lock);
++   thrd_join(rec->thread, NULL);
++
++   mtx_destroy(&rec->lock);
++   cnd_destroy(&rec->work);
++   cnd_destroy(&rec->done);
++   vk_free(&device->vk.alloc, rec);
++   device->threaded = NULL;
++}
++
++static void radv_threaded_wait(struct radv_cmd_buffer *cmd_buffer);
++
++/* Hands what is queued on the command buffer to the worker. */
++static void
++radv_threaded_kick(struct radv_cmd_buffer *cmd_buffer)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_threaded_recorder *rec = device->threaded;
++   struct vk_cmd_queue *queue = &cmd_buffer->vk.cmd_queue;
++
++   cmd_buffer->threaded.queued = 0;
++   if (!queue->ctx || list_is_empty(&queue->cmds))
++      return;
++
++   struct radv_threaded_batch *batch = linear_alloc_child(queue->ctx, sizeof(*batch));
++   if (!batch) {
++      /* Recorded here instead, once the worker is done with it. */
++      radv_threaded_wait(cmd_buffer);
++      radv_threaded_on_worker = true;
++      vk_cmd_queue_execute(queue, radv_cmd_buffer_to_handle(cmd_buffer), &device->layer_dispatch.threaded);
++      radv_threaded_on_worker = false;
++      list_inithead(&queue->cmds);
++      return;
++   }
++
++   batch->cmd_buffer = cmd_buffer;
++   list_replace(&queue->cmds, &batch->cmds);
++   list_inithead(&queue->cmds);
++
++   p_atomic_inc(&cmd_buffer->threaded.pending);
++
++   mtx_lock(&rec->lock);
++   list_addtail(&batch->link, &rec->batches);
++   rec->kicked++;
++   p_atomic_inc(&rec->queued);
++   if (rec->sleeping)
++      cnd_signal(&rec->work);
++   mtx_unlock(&rec->lock);
++}
++
++void
++radv_threaded_note(struct radv_cmd_buffer *cmd_buffer, bool kick_point)
++{
++   const uint32_t queued = ++cmd_buffer->threaded.queued;
++   if ((kick_point && queued >= RADV_THREADED_KICK_COMMANDS) || queued >= RADV_THREADED_MAX_COMMANDS)
++      radv_threaded_kick(cmd_buffer);
++}
++
++/* Waits for the batches of the command buffer the worker has. */
++static void
++radv_threaded_wait(struct radv_cmd_buffer *cmd_buffer)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_threaded_recorder *rec = device->threaded;
++
++   if (!p_atomic_read(&cmd_buffer->threaded.pending))
++      return;
++
++   mtx_lock(&rec->lock);
++   while (p_atomic_read(&cmd_buffer->threaded.pending))
++      cnd_wait(&rec->done, &rec->lock);
++   mtx_unlock(&rec->lock);
++}
++
++void
++radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer)
++{
++   radv_threaded_kick(cmd_buffer);
++   radv_threaded_wait(cmd_buffer);
++}
++
++/* For a reset, a begin or a free: what is still queued is dropped (it may
++ * name objects destroyed since, and nothing recorded so far is kept) and
++ * what the worker has is waited for. The queue's memory goes with the reset. */
++static void
++radv_threaded_discard(struct radv_cmd_buffer *cmd_buffer)
++{
++   struct vk_cmd_queue *queue = &cmd_buffer->vk.cmd_queue;
++
++   cmd_buffer->threaded.queued = 0;
++   if (queue->ctx)
++      list_inithead(&queue->cmds);
++   radv_threaded_wait(cmd_buffer);
++}
++
++void
++radv_threaded_barrier(struct radv_device *device)
++{
++   struct radv_threaded_recorder *rec = device->threaded;
++
++   /* The worker itself (a runtime helper destroying its own objects) has
++    * recorded everything before what it records now. */
++   if (!rec || radv_threaded_on_worker)
++      return;
++
++   mtx_lock(&rec->lock);
++   const uint64_t target = rec->kicked;
++   if (rec->recorded < target) {
++      rec->barriers++;
++      while (rec->recorded < target)
++         cnd_wait(&rec->done, &rec->lock);
++      rec->barriers--;
++   }
++   mtx_unlock(&rec->lock);
++}
++
++/* Every command buffer of the pool discarded (resets and frees of the pool)
++ * or only waited for (trims, which leave recording command buffers be). */
++static void
++radv_threaded_pool(VkCommandPool commandPool, bool discard)
++{
++   VK_FROM_HANDLE(vk_command_pool, pool, commandPool);
++   if (!pool)
++      return;
++
++   list_for_each_entry (struct vk_command_buffer, vk_cmd_buffer, &pool->command_buffers, pool_link) {
++      struct radv_cmd_buffer *cmd_buffer = container_of(vk_cmd_buffer, struct radv_cmd_buffer, vk);
++      if (discard)
++         radv_threaded_discard(cmd_buffer);
++      else
++         radv_threaded_wait(cmd_buffer);
++   }
++}
++
++void
++radv_threaded_queue_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
++                                          VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
++                                          const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
++                                          const uint32_t *pDynamicOffsets)
++{
++   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
++   struct vk_cmd_queue *queue = &cmd_buffer->vk.cmd_queue;
++
++   if (vk_command_buffer_has_error(&cmd_buffer->vk))
++      return;
++
++   struct vk_cmd_queue_entry *cmd = linear_alloc_child(queue->ctx, vk_cmd_queue_type_sizes[VK_CMD_BIND_DESCRIPTOR_SETS]);
++   VkDescriptorSet *sets = descriptorSetCount ? linear_alloc_child(queue->ctx, sizeof(*sets) * descriptorSetCount) : NULL;
++   uint32_t *offsets = dynamicOffsetCount ? linear_alloc_child(queue->ctx, sizeof(*offsets) * dynamicOffsetCount) : NULL;
++   if (!cmd || (descriptorSetCount && !sets) || (dynamicOffsetCount && !offsets)) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return;
++   }
++
++   if (descriptorSetCount)
++      memcpy(sets, pDescriptorSets, sizeof(*sets) * descriptorSetCount);
++   if (dynamicOffsetCount)
++      memcpy(offsets, pDynamicOffsets, sizeof(*offsets) * dynamicOffsetCount);
++
++   cmd->type = VK_CMD_BIND_DESCRIPTOR_SETS;
++   cmd->u.bind_descriptor_sets.pipeline_bind_point = pipelineBindPoint;
++   cmd->u.bind_descriptor_sets.layout = layout;
++   cmd->u.bind_descriptor_sets.first_set = firstSet;
++   cmd->u.bind_descriptor_sets.descriptor_set_count = descriptorSetCount;
++   cmd->u.bind_descriptor_sets.descriptor_sets = sets;
++   cmd->u.bind_descriptor_sets.dynamic_offset_count = dynamicOffsetCount;
++   cmd->u.bind_descriptor_sets.dynamic_offsets = offsets;
++   list_addtail(&cmd->cmd_link, &queue->cmds);
++}
++
++void
++radv_threaded_queue_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
++                                     VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void *pValues)
++{
++   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
++   struct vk_cmd_queue *queue = &cmd_buffer->vk.cmd_queue;
++
++   if (vk_command_buffer_has_error(&cmd_buffer->vk))
++      return;
++
++   struct vk_cmd_queue_entry *cmd = linear_alloc_child(queue->ctx, vk_cmd_queue_type_sizes[VK_CMD_PUSH_CONSTANTS]);
++   void *values = size ? linear_alloc_child(queue->ctx, size) : NULL;
++   if (!cmd || (size && !values)) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return;
++   }
++
++   if (size)
++      memcpy(values, pValues, size);
++
++   cmd->type = VK_CMD_PUSH_CONSTANTS;
++   cmd->u.push_constants.layout = layout;
++   cmd->u.push_constants.stage_flags = stageFlags;
++   cmd->u.push_constants.offset = offset;
++   cmd->u.push_constants.size = size;
++   cmd->u.push_constants.values = values;
++   list_addtail(&cmd->cmd_link, &queue->cmds);
++}
++
++/* The command buffer lifecycle: an end records what is queued first; a
++ * begin, a reset or a free drops it (radv_threaded_discard). */
++
++VKAPI_ATTR VkResult VKAPI_CALL
++threaded_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBeginInfo *pBeginInfo)
++{
++   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++
++   radv_threaded_discard(cmd_buffer);
++
++   /* RADV makes its command buffers without the runtime's queue. */
++   if (!cmd_buffer->vk.cmd_queue.ctx)
++      vk_cmd_queue_init(&cmd_buffer->vk.cmd_queue);
++   cmd_buffer->threaded.queued = 0;
++
++   return device->layer_dispatch.threaded.BeginCommandBuffer(commandBuffer, pBeginInfo);
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++threaded_EndCommandBuffer(VkCommandBuffer commandBuffer)
++{
++   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++
++   radv_threaded_drain(cmd_buffer);
++   return device->layer_dispatch.threaded.EndCommandBuffer(commandBuffer);
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++threaded_ResetCommandBuffer(VkCommandBuffer commandBuffer, VkCommandBufferResetFlags flags)
++{
++   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++
++   radv_threaded_discard(cmd_buffer);
++   return device->layer_dispatch.threaded.ResetCommandBuffer(commandBuffer, flags);
++}
++
++VKAPI_ATTR void VKAPI_CALL
++threaded_FreeCommandBuffers(VkDevice _device, VkCommandPool commandPool, uint32_t commandBufferCount,
++                            const VkCommandBuffer *pCommandBuffers)
++{
++   VK_FROM_HANDLE(radv_device, device, _device);
++
++   for (uint32_t i = 0; i < commandBufferCount; i++) {
++      if (pCommandBuffers[i])
++         radv_threaded_discard(radv_cmd_buffer_from_handle(pCommandBuffers[i]));
++   }
++
++   device->layer_dispatch.threaded.FreeCommandBuffers(_device, commandPool, commandBufferCount, pCommandBuffers);
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++threaded_ResetCommandPool(VkDevice _device, VkCommandPool commandPool, VkCommandPoolResetFlags flags)
++{
++   VK_FROM_HANDLE(radv_device, device, _device);
++
++   radv_threaded_pool(commandPool, true);
++   return device->layer_dispatch.threaded.ResetCommandPool(_device, commandPool, flags);
++}
++
++VKAPI_ATTR void VKAPI_CALL
++threaded_TrimCommandPool(VkDevice _device, VkCommandPool commandPool, VkCommandPoolTrimFlags flags)
++{
++   VK_FROM_HANDLE(radv_device, device, _device);
++
++   radv_threaded_pool(commandPool, false);
++   device->layer_dispatch.threaded.TrimCommandPool(_device, commandPool, flags);
++}
++
++VKAPI_ATTR void VKAPI_CALL
++threaded_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator)
++{
++   VK_FROM_HANDLE(radv_device, device, _device);
++
++   radv_threaded_pool(commandPool, true);
++   device->layer_dispatch.threaded.DestroyCommandPool(_device, commandPool, pAllocator);
++}
+diff --git a/src/amd/vulkan/layers/radv_threaded_layer.h b/src/amd/vulkan/layers/radv_threaded_layer.h
+new file mode 100644
+index 00000000000..9dce550ef45
+--- /dev/null
++++ b/src/amd/vulkan/layers/radv_threaded_layer.h
+@@ -0,0 +1,52 @@
++/*
++ * Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef RADV_THREADED_LAYER_H
++#define RADV_THREADED_LAYER_H
++
++#include <stdbool.h>
++
++#include "vulkan/vulkan_core.h"
++
++struct radv_cmd_buffer;
++struct radv_device;
++
++/* Threaded recording (RADV_THREADED_RECORDING=1): an application's vkCmd*
++ * calls are queued on the command buffer (the runtime's vk_cmd_queue, the
++ * arguments copied) and a worker thread of the device records them, batch by
++ * batch, while the application goes on; vkEndCommandBuffer returns once the
++ * worker has recorded everything queued. The application's thread spends
++ * what copying the arguments costs instead of what recording does. */
++
++bool radv_threaded_recording_enabled(void);
++VkResult radv_threaded_device_init(struct radv_device *device);
++void radv_threaded_device_finish(struct radv_device *device);
++
++/* True on the worker while it records: a runtime helper that calls back
++ * through the device's dispatch table then goes straight down. */
++bool radv_threaded_replaying(void);
++
++/* A command was queued; at a kick point with enough queued, the worker gets it. */
++void radv_threaded_note(struct radv_cmd_buffer *cmd_buffer, bool kick_point);
++
++/* Everything queued on the command buffer is recorded when this returns. */
++void radv_threaded_drain(struct radv_cmd_buffer *cmd_buffer);
++
++/* Every batch handed to the worker so far is recorded when this returns: the
++ * layer's destroys and frees call it first, since a queued command may name
++ * the object (radv_threaded_layer_gen.py). */
++void radv_threaded_barrier(struct radv_device *device);
++
++void radv_threaded_queue_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
++                                               VkPipelineLayout layout, uint32_t firstSet,
++                                               uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets,
++                                               uint32_t dynamicOffsetCount, const uint32_t *pDynamicOffsets);
++
++void radv_threaded_queue_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
++                                          VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size,
++                                          const void *pValues);
++
++#endif /* RADV_THREADED_LAYER_H */
+diff --git a/src/amd/vulkan/layers/radv_threaded_layer_gen.py b/src/amd/vulkan/layers/radv_threaded_layer_gen.py
+new file mode 100644
+index 00000000000..1a82c45475b
+--- /dev/null
++++ b/src/amd/vulkan/layers/radv_threaded_layer_gen.py
+@@ -0,0 +1,174 @@
++COPYRIGHT=u"""
++/* Copyright © 2026 Mihawk
++ *
++ * SPDX-License-Identifier: MIT
++ */
++"""
++
++# The threaded recording layer's command entrypoints (radv_threaded_layer.c):
++# each vkCmd* is queued on the command buffer (the runtime's vk_cmd_queue)
++# for the layer's worker to record, or, on the worker itself (a runtime helper
++# calling back through the device's dispatch table while it records), passed
++# down the layer's own table.
++
++import argparse
++import os
++import re
++import sys
++
++import mako
++from mako.template import Template
++
++sys.path.append(os.path.join(sys.path[0], '../../../vulkan/util/'))
++
++from vk_entrypoints import get_entrypoints_from_xml
++from vk_cmd_queue_gen import NO_ENQUEUE_COMMANDS
++
++# Commands whose runtime enqueue takes references on pipeline layouts,
++# descriptor set layouts or update templates as the runtime's own objects,
++# which RADV's are not: the two RPCS3-style ones are queued by the layer
++# itself (radv_threaded_layer.c), the rest are recorded directly once the
++# command buffer's queued work is done.
++LAYER_QUEUED_COMMANDS = [
++    'CmdBindDescriptorSets',
++    'CmdPushConstants',
++]
++
++DIRECT_COMMANDS = [
++    'CmdPushDescriptorSet',
++    'CmdPushDescriptorSetWithTemplate',
++    'CmdSetDescriptorBufferOffsetsEXT',
++    'CmdBindDescriptorBufferEmbeddedSamplersEXT',
++    'CmdBindDescriptorSets2',
++    'CmdPushConstants2',
++    'CmdPushDescriptorSet2',
++    'CmdPushDescriptorSetWithTemplate2',
++    'CmdSetDescriptorBufferOffsets2EXT',
++    'CmdBindDescriptorBufferEmbeddedSamplers2EXT',
++] + NO_ENQUEUE_COMMANDS
++
++# Destroys and frees the layer implements itself (the command buffer's own).
++LAYER_DESTROYS = ['DestroyDevice', 'DestroyCommandPool', 'FreeCommandBuffers']
++
++# Commands after which the layer may hand what is queued to its worker.
++KICK_COMMANDS = [
++    'CmdDraw', 'CmdDrawIndexed', 'CmdDrawIndirect', 'CmdDrawIndexedIndirect',
++    'CmdDrawIndirectCount', 'CmdDrawIndexedIndirectCount', 'CmdDrawMultiEXT',
++    'CmdDrawMultiIndexedEXT', 'CmdDrawMeshTasksEXT', 'CmdDispatch',
++    'CmdDispatchIndirect', 'CmdDispatchBase', 'CmdCopyBuffer', 'CmdCopyImage',
++    'CmdCopyBufferToImage', 'CmdCopyImageToBuffer', 'CmdBlitImage',
++    'CmdCopyBuffer2', 'CmdCopyImage2', 'CmdCopyBufferToImage2',
++    'CmdCopyImageToBuffer2', 'CmdBlitImage2', 'CmdClearColorImage',
++    'CmdClearDepthStencilImage', 'CmdClearAttachments', 'CmdEndRenderPass',
++    'CmdEndRenderPass2', 'CmdEndRendering',
++]
++
++TEMPLATE = Template(COPYRIGHT + """
++/* This file generated from ${filename}, don't edit directly. */
++
++#include "radv_cmd_buffer.h"
++#include "radv_device.h"
++#include "radv_entrypoints.h"
++#include "layers/radv_threaded_layer.h"
++#include "vk_cmd_enqueue_entrypoints.h"
++
++% for c in commands:
++% if c.guard is not None:
++#ifdef ${c.guard}
++% endif
++VKAPI_ATTR void VKAPI_CALL
++threaded_${c.name}(${c.decl_params()})
++{
++   struct radv_cmd_buffer *cmd_buffer = radv_cmd_buffer_from_handle(commandBuffer);
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++
++   if (radv_threaded_replaying()) {
++      device->layer_dispatch.threaded.${c.name}(${c.call_params()});
++      return;
++   }
++
++% if c.name in direct_commands:
++   radv_threaded_drain(cmd_buffer);
++   device->layer_dispatch.threaded.${c.name}(${c.call_params()});
++% elif c.name in layer_queued_commands:
++   radv_threaded_queue_${c.name}(${c.call_params()});
++   radv_threaded_note(cmd_buffer, false);
++% else:
++   vk_cmd_enqueue_${c.name}(${c.call_params()});
++   radv_threaded_note(cmd_buffer, ${'true' if c.name in kick_commands else 'false'});
++% endif
++}
++
++% if c.guard is not None:
++#endif // ${c.guard}
++% endif
++% endfor
++
++/* Destroys and frees: a batch handed to the worker may name the object. */
++% for d in destroys:
++% if d.guard is not None:
++#ifdef ${d.guard}
++% endif
++VKAPI_ATTR ${d.return_type} VKAPI_CALL
++threaded_${d.name}(${d.decl_params()})
++{
++   struct radv_device *radv_device = radv_device_from_handle(${d.params[0].name});
++
++   radv_threaded_barrier(radv_device);
++   ${'return ' if d.return_type != 'void' else ''}radv_device->layer_dispatch.threaded.${d.name}(${d.call_params()});
++}
++
++% if d.guard is not None:
++#endif // ${d.guard}
++% endif
++% endfor
++""")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--out-c", required=True, help="Output C file.")
++    parser.add_argument("--beta", required=True, help="Enable beta extensions.")
++    parser.add_argument("--xml",
++                        help="Vulkan API XML file.",
++                        required=True, action="append", dest="xml_files")
++    args = parser.parse_args()
++
++    # The commands the runtime's queue knows (vk_cmd_queue_gen.py's choice):
++    # every vkCmd* that is not an alias; those returning a value are among
++    # NO_ENQUEUE_COMMANDS and are recorded directly.
++    commands = []
++    destroys = []
++    for e in get_entrypoints_from_xml(args.xml_files, args.beta):
++        if e.alias:
++            continue
++        # Every device-level vkDestroy*, vkFree* and vkResetDescriptorPool
++        # (which frees the pool's sets).
++        if (re.match(r'(Destroy|Free)[A-Z]', e.name) or e.name == 'ResetDescriptorPool') and \
++           e.is_device_entrypoint() and e.name not in LAYER_DESTROYS:
++            destroys.append(e)
++            continue
++        if not e.name.startswith('Cmd'):
++            continue
++        if e.return_type != "void":
++            continue
++        commands.append(e)
++
++    environment = {
++        "filename": os.path.basename(__file__),
++        "commands": commands,
++        "destroys": destroys,
++        "direct_commands": DIRECT_COMMANDS,
++        "layer_queued_commands": LAYER_QUEUED_COMMANDS,
++        "kick_commands": KICK_COMMANDS,
++    }
++
++    try:
++        with open(args.out_c, "w", encoding='utf-8') as f:
++            f.write(TEMPLATE.render(**environment))
++    except Exception:
++        print(mako.exceptions.text_error_template().render(), file=sys.stderr)
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 24e9b189446..7068b2bd9d7 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -40,6 +40,9 @@ radv_entrypoints_gen_command += [
+ 
+   # Command buffer annotation layer entrypoints
+   '--device-prefix', 'annotate',
++
++  # Threaded recording layer entrypoints
++  '--device-prefix', 'threaded',
+ ]
+ 
+ radv_entrypoints = custom_target(
+@@ -70,6 +73,8 @@ libradv_files = files(
+   'layers/radv_rmv_layer.c',
+   'layers/radv_rra_layer.c',
+   'layers/radv_sqtt_layer.c',
++  'layers/radv_threaded_layer.c',
++  'layers/radv_threaded_layer.h',
+   'layers/radv_utrace_layer.c',
+   'meta/radv_meta.c',
+   'meta/radv_meta.h',
+@@ -340,7 +345,7 @@ _radv_target = {
+   'gnu_symbol_visibility' : 'hidden',
+   'install' : true,
+ }
+-_radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer]
++_radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer, radv_threaded_layer]
+ 
+ # A PS5 title cannot load a shared library, so the console build is an archive
+ # the title links; the host build of the PS5 winsys stays a loadable ICD.
+diff --git a/src/amd/vulkan/radv_cmd_buffer.h b/src/amd/vulkan/radv_cmd_buffer.h
+index 45211141172..93d3af3248f 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.h
++++ b/src/amd/vulkan/radv_cmd_buffer.h
+@@ -547,6 +547,13 @@ struct radv_cmd_buffer_queue_state {
+ struct radv_cmd_buffer {
+    struct vk_command_buffer vk;
+ 
++   /* Threaded recording (layers/radv_threaded_layer.c): commands queued since
++    * the last hand-over, and batches the worker has yet to record. */
++   struct {
++      uint32_t queued;
++      uint32_t pending;
++   } threaded;
++
+    struct {
+       struct u_trace *trace;
+       uint32_t last_cdw;
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index 1e304230192..8d6cc524c6a 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -17,6 +17,7 @@
+ #endif
+ 
+ #include "layers/radv_app_workarounds.h"
++#include "layers/radv_threaded_layer.h"
+ #include "meta/radv_meta.h"
+ #include "tools/radv_debug_hang.h"
+ #include "tools/radv_rmv.h"
+@@ -806,6 +807,7 @@ init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pd
+    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+    struct dispatch_table_builder b = {0};
+    b.tables[RADV_DEVICE_DISPATCH_TABLE] = &device->vk.dispatch_table;
++   b.tables[RADV_THREADED_DISPATCH_TABLE] = &device->layer_dispatch.threaded;
+    b.tables[RADV_ANNOTATE_DISPATCH_TABLE] = &device->layer_dispatch.annotate;
+    b.tables[RADV_APP_DISPATCH_TABLE] = &device->layer_dispatch.app;
+    b.tables[RADV_RGP_DISPATCH_TABLE] = &device->layer_dispatch.rgp;
+@@ -814,6 +816,9 @@ init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pd
+    b.tables[RADV_UTRACE_DISPATCH_TABLE] = &device->layer_dispatch.utrace;
+    b.tables[RADV_CTX_ROLL_DISPATCH_TABLE] = &device->layer_dispatch.ctx_roll;
+ 
++   if (device->threaded)
++      add_entrypoints(&b, &threaded_device_entrypoints, RADV_THREADED_DISPATCH_TABLE);
++
+    bool gather_ctx_rolls = instance->vk.trace_mode & RADV_TRACE_MODE_CTX_ROLLS;
+    if (radv_device_fault_detection_enabled(device) || gather_ctx_rolls)
+       add_entrypoints(&b, &annotate_device_entrypoints, RADV_ANNOTATE_DISPATCH_TABLE);
+@@ -1349,6 +1354,7 @@ radv_create_winsys(struct radv_device *device)
+ static void
+ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAllocator)
+ {
++   radv_threaded_device_finish(device);
+    radv_device_finish_utrace(device);
+    radv_device_finish_perf_counter(device);
+ 
+@@ -1473,8 +1479,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+-   init_dispatch_tables(device, pdev);
+-
+    /* Initialize everything required for compilation, first. */
+ 
+    simple_mtx_init(&device->ctx_roll_mtx, mtx_plain);
+@@ -1488,6 +1492,16 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+ 
+    radv_init_shader_arenas(device);
+ 
++   /* Threaded recording's worker before the dispatch tables, which depend on
++    * it; after what radv_destroy_device takes apart when it fails. */
++   if (radv_threaded_recording_enabled()) {
++      result = radv_threaded_device_init(device);
++      if (result != VK_SUCCESS)
++         goto fail;
++   }
++
++   init_dispatch_tables(device, pdev);
++
+    if (!device->vk.disable_internal_cache) {
+       result = radv_device_init_memory_cache(device);
+       if (result != VK_SUCCESS)
+diff --git a/src/amd/vulkan/radv_device.h b/src/amd/vulkan/radv_device.h
+index 2b0c5d6c880..0dd29356a2d 100644
+--- a/src/amd/vulkan/radv_device.h
++++ b/src/amd/vulkan/radv_device.h
+@@ -38,6 +38,9 @@ struct radv_cmd_stream;
+ 
+ enum radv_dispatch_table {
+    RADV_DEVICE_DISPATCH_TABLE,
++   /* Outermost: threaded recording queues the application's commands before
++    * any other layer sees them (its worker then records through the rest). */
++   RADV_THREADED_DISPATCH_TABLE,
+    RADV_ANNOTATE_DISPATCH_TABLE,
+    RADV_APP_DISPATCH_TABLE,
+    RADV_RGP_DISPATCH_TABLE,
+@@ -49,6 +52,7 @@ enum radv_dispatch_table {
+ };
+ 
+ struct radv_layer_dispatch_tables {
++   struct vk_device_dispatch_table threaded;
+    struct vk_device_dispatch_table annotate;
+    struct vk_device_dispatch_table app;
+    struct vk_device_dispatch_table rgp;
+@@ -262,6 +266,9 @@ struct radv_device {
+    FILE *ctx_roll_file;
+    simple_mtx_t ctx_roll_mtx;
+ 
++   /* Threaded recording's worker (layers/radv_threaded_layer.c), or NULL. */
++   struct radv_threaded_recorder *threaded;
++
+    /* Trap handler. */
+    struct radv_shader *trap_handler_shader;
+    struct radeon_winsys_bo *tma_bo; /* Trap Memory Address */

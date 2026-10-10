@@ -1,0 +1,697 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:36 +0000
+Subject: [PATCH] radv/ps5: report what the GPU can do, and nothing it cannot
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  901ee809730 aco: buffer scratch where a shader cannot set FLAT_SCRATCH
+  5d0f65af185 radv/ps5: no performance queries
+  7e587278c7a radv: ray tracing pipelines need flat scratch
+  658fabdd62f radv/ps5: no ray tracing until acceleration structure builds run
+  48a0444f3da radv/ps5: no fragment shader barycentrics on GFX10.1's parameter cache
+  4acfcbe3822 radv/ps5: addrlib gets GFX1013's revision, with the depth mipmap fix
+  234e9ff5f47 radv/ps5: compute waves find their subgroup ID in the ordered wave ID
+  e307009aeb4 radv: report fragment shading rate only where the rasterizer has VRS
+  ad8458e373d radv: report capture and replay only where a buffer can be placed
+  62f2b6006fd radv: count only the representations there are; never read a missing one
+  458250f1abd radv: export a VS's implicit primitive ID per primitive only where NGG can
+  f7f32dc2905 radv: rebuild ray traversal node addresses by sign extension
+---
+ src/amd/common/ac_gpu_info.c                  | 11 ++++
+ src/amd/common/ac_gpu_info.h                  | 27 ++++++++-
+ src/amd/common/nir/ac_nir.h                   |  2 +
+ .../nir/ac_nir_lower_intrinsics_to_args.c     |  4 +-
+ src/amd/compiler/aco_ir.cpp                   |  2 +
+ src/amd/compiler/aco_ir.h                     |  3 +
+ src/amd/compiler/aco_spill.cpp                | 16 +++---
+ .../aco_isel_helpers.cpp                      |  2 +-
+ .../aco_select_nir_intrinsics.cpp             |  8 +--
+ src/amd/vulkan/nir/radv_nir_rt_common.c       |  8 ++-
+ src/amd/vulkan/radv_device.c                  |  2 +-
+ src/amd/vulkan/radv_physical_device.c         | 52 ++++++++++-------
+ src/amd/vulkan/radv_physical_device.h         |  2 +
+ src/amd/vulkan/radv_pipeline.c                | 25 +++++---
+ src/amd/vulkan/radv_shader_info.c             |  7 ++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   | 57 ++++++++++++++++++-
+ 16 files changed, 174 insertions(+), 54 deletions(-)
+
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index 277970464bb..688c540c6e3 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -331,6 +331,9 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
+                                info->family == CHIP_MI200 || info->family == CHIP_GFX940;
+    out->has_point_sample_accel = info->family == CHIP_STRIX1 || info->family == CHIP_STRIX_HALO ||
+                                  info->family == CHIP_KRACKAN1 || info->gfx_level == GFX11_7;
++   out->has_flat_scratch = info->gfx_level >= GFX9;
++   out->has_cs_wave_id = info->gfx_level >= GFX10_3;
++   out->has_ngg_per_prim_params = info->gfx_level >= GFX10_3;
+    out->has_fast_fma32 = info->gfx_level >= GFX9 || info->family == CHIP_TAHITI ||
+                          info->family == CHIP_HAWAII || info->family == CHIP_CARRIZO;
+    out->has_fma_mix = info->gfx_level >= GFX10 || info->family == CHIP_VEGA12 ||
+@@ -1065,6 +1068,10 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
+    info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
+    info->has_legacy_gs = info->gfx_level < GFX11;
+    info->has_gpu_written_ibs = true;
++   info->has_perf_counters = true;
++   info->has_ps_strict_vertex_order = info->gfx_level >= GFX10_3;
++   info->has_vrs = info->gfx_level >= GFX10_3;
++   info->has_replayable_va = true;
+    info->has_syncobj = true;
+    info->has_fence_to_handle = true;
+ 
+@@ -2065,6 +2072,10 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
+    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
+    fprintf(f, "    has_legacy_gs = %i\n", info->has_legacy_gs);
+    fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
++   fprintf(f, "    has_perf_counters = %i\n", info->has_perf_counters);
++   fprintf(f, "    has_ps_strict_vertex_order = %i\n", info->has_ps_strict_vertex_order);
++   fprintf(f, "    has_vrs = %i\n", info->has_vrs);
++   fprintf(f, "    has_replayable_va = %i\n", info->has_replayable_va);
+    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
+    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
+    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
+diff --git a/src/amd/common/ac_gpu_info.h b/src/amd/common/ac_gpu_info.h
+index a004256a386..cd987d16ecb 100644
+--- a/src/amd/common/ac_gpu_info.h
++++ b/src/amd/common/ac_gpu_info.h
+@@ -127,6 +127,13 @@ struct ac_compiler_info {
+    uint32_t has_sram_ecc_enabled : 1;
+    /* Whether image_sample* instructions can be either a sampler or no-sampler access.*/
+    uint32_t has_point_sample_accel : 1;
++   /* Whether a shader may set its own FLAT_SCRATCH base (s_setreg on GFX10),
++    * which GFX9-GFX10.3 scratch instructions need; without it, scratch goes
++    * through buffer instructions, as on GFX8. */
++   uint32_t has_flat_scratch : 1;
++   /* Whether a compute wave finds its index in the workgroup in TG_SIZE's bits
++    * 20-24 (GFX10.3+); without it the ordered wave ID (bits 6-11) serves. */
++   uint32_t has_cs_wave_id : 1;
+    uint32_t has_fast_fma32 : 1;
+    /* Whether chips support fused v_fma_mix* instructions.
+     * Otherwise, unfused v_mad_mix* is available on GFX9.
+@@ -205,8 +212,10 @@ struct ac_compiler_info {
+    /* GFX6-GFX12, except GFX9: SMEM loads on NULL PRT page don't work. */
+    uint32_t has_smem_with_null_prt_bug : 1;
+    uint32_t has_desc_resource_level : 1;
+-
+-   uint32_t reserved : 2;
++   /* Whether NGG exports per-primitive parameters the PS reads
++    * (SPI_PS_INPUT_CNTL PRIM_ATTR, GFX10.3+), as it does a VS's implicit
++    * primitive ID; without them the ID goes per vertex, as on GFX10.1. */
++   uint32_t has_ngg_per_prim_params : 1;
+ };
+ 
+ struct radeon_info {
+@@ -379,6 +388,20 @@ struct radeon_info {
+    /* Whether the CP runs a command buffer the GPU wrote, chained with
+     * INDIRECT_BUFFER: device-generated commands need it. */
+    bool has_gpu_written_ibs;
++   /* Whether performance counters can be programmed with the GPU held at a
++    * stable power state: VK_KHR_performance_query needs both. */
++   bool has_perf_counters;
++   /* Whether the SPI rotates the parameter cache to a primitive's vertex order
++    * for per-vertex fragment inputs (SPI_PS_INPUT_CNTL.ROTATE_PC_PTR, GFX10.3+):
++    * VK_KHR_fragment_shader_barycentric needs it. */
++   bool has_ps_strict_vertex_order;
++   /* Whether the rasterizer shades at a coarse fragment size (PA_CL_VRS_CNTL,
++    * GFX10.3+): VK_KHR_fragment_shading_rate needs it. */
++   bool has_vrs;
++   /* Whether a buffer can be placed at the GPU address an earlier allocation
++    * was given (RADEON_FLAG_REPLAYABLE with a replay address): every capture
++    * and replay feature needs it. */
++   bool has_replayable_va;
+    bool has_syncobj;
+    bool has_timeline_syncobj;
+    bool has_fence_to_handle;
+diff --git a/src/amd/common/nir/ac_nir.h b/src/amd/common/nir/ac_nir.h
+index 14bbd6b3312..e87e34c3860 100644
+--- a/src/amd/common/nir/ac_nir.h
++++ b/src/amd/common/nir/ac_nir.h
+@@ -103,6 +103,8 @@ typedef struct {
+    unsigned workgroup_size;
+    bool use_llvm;
+    bool load_grid_size_from_user_sgpr;
++   /* A GFX10.3+ compute wave's TG_SIZE has no wave ID (ac_compiler_info.has_cs_wave_id). */
++   bool no_cs_wave_id;
+ } ac_nir_lower_intrinsics_to_args_options;
+ 
+ bool ac_nir_lower_intrinsics_to_args(nir_shader *shader, const struct ac_shader_args *ac_args,
+diff --git a/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c b/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
+index f51b184ea27..dca5945dba0 100644
+--- a/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
++++ b/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
+@@ -52,11 +52,11 @@ load_subgroup_id_lowered(lower_intrinsics_to_args_state *s, nir_builder *b)
+          assert(!s->options->use_llvm);
+          nir_def *ttmp8 = nir_load_ttmp_register_wg_div_amd(b, .base = 8);
+          return nir_ubfe_imm(b, ttmp8, 25, 5);
+-      } else if (s->options->gfx_level >= GFX10_3) {
++      } else if (s->options->gfx_level >= GFX10_3 && !s->options->no_cs_wave_id) {
+          assert(s->args->tg_size.used);
+          return ac_nir_unpack_arg_wg_div(b, s->args, s->args->tg_size, 20, 5);
+       } else {
+-         /* GFX6-10 don't actually support a wave id, but we can
++         /* GFX6-10 (and GFX10.3 GPUs without it) don't actually support a wave id, but we can
+           * use the ordered id because ORDERED_APPEND_* is set to
+           * zero in the compute dispatch initiator.
+           */
+diff --git a/src/amd/compiler/aco_ir.cpp b/src/amd/compiler/aco_ir.cpp
+index 1955bf76aca..8754997a1a3 100644
+--- a/src/amd/compiler/aco_ir.cpp
++++ b/src/amd/compiler/aco_ir.cpp
+@@ -113,6 +113,8 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
+ 
+    program->dev.sram_ecc_enabled = options->compiler_info->has_sram_ecc_enabled;
+    program->dev.has_point_sample_accel = options->compiler_info->has_point_sample_accel;
++   program->dev.mubuf_scratch = program->gfx_level < GFX9 ||
++                                (program->gfx_level <= GFX10_3 && !options->compiler_info->has_flat_scratch);
+    program->dev.has_gfx6_mrt_export_bug = options->compiler_info->has_gfx6_mrt_export_bug;
+ 
+    program->dev.has_fast_fma32 = options->compiler_info->has_fast_fma32;
+diff --git a/src/amd/compiler/aco_ir.h b/src/amd/compiler/aco_ir.h
+index 4082a9519ed..73ee25681f2 100644
+--- a/src/amd/compiler/aco_ir.h
++++ b/src/amd/compiler/aco_ir.h
+@@ -2303,6 +2303,9 @@ struct DeviceInfo {
+    bool xnack_enabled = false;
+    bool sram_ecc_enabled = false;
+    bool has_point_sample_accel = false;
++   /* Scratch goes through buffer instructions with a scratch resource (GFX6-8,
++    * and GFX9-GFX10.3 where a shader cannot set FLAT_SCRATCH), not scratch_*. */
++   bool mubuf_scratch = false;
+    bool has_gfx6_mrt_export_bug = false;
+    bool has_desc_resource_level = false;
+ 
+diff --git a/src/amd/compiler/aco_spill.cpp b/src/amd/compiler/aco_spill.cpp
+index 3e238f1d97b..123d49c29b3 100644
+--- a/src/amd/compiler/aco_spill.cpp
++++ b/src/amd/compiler/aco_spill.cpp
+@@ -1225,7 +1225,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
+    uint32_t scratch_size = ctx.program->config->scratch_bytes_per_wave / ctx.program->wave_size;
+ 
+    uint32_t offset_range;
+-   if (ctx.program->gfx_level >= GFX9) {
++   if (!ctx.program->dev.mubuf_scratch) {
+       offset_range =
+          ctx.program->dev.scratch_global_offset_max - ctx.program->dev.scratch_global_offset_min;
+    } else {
+@@ -1243,7 +1243,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
+    unsigned bld_block = block.index;
+    if (block.kind & block_kind_top_level) {
+       rsrc_bld.reset(&instructions);
+-   } else if (ctx.scratch_rsrc == Temp() && (!overflow || ctx.program->gfx_level < GFX9)) {
++   } else if (ctx.scratch_rsrc == Temp() && (!overflow || ctx.program->dev.mubuf_scratch)) {
+       Block* tl_block = nullptr;
+       for (int i = block.index; i >= 0; i--) {
+          if (ctx.program->blocks[i].kind & block_kind_contains_call)
+@@ -1281,7 +1281,7 @@ setup_vgpr_spill_reload(spill_ctx& ctx, Block& block,
+       offset_bld.reset(&instructions);
+ 
+    *offset = spill_slot * 4;
+-   if (ctx.program->gfx_level >= GFX9) {
++   if (!ctx.program->dev.mubuf_scratch) {
+       *offset += ctx.program->dev.scratch_global_offset_min;
+ 
+       if (ctx.scratch_rsrc == Temp() || overflow) {
+@@ -1396,7 +1396,7 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
+          if (i < lds_slots) {
+             bld.ds(aco_opcode::ds_write_addtid_b32, bld.m0(ctx.lds_m0_zero), elem, lds_offset);
+             lds_offset += workgroup_size * 4;
+-         } else if (ctx.program->gfx_level >= GFX9) {
++         } else if (!ctx.program->dev.mubuf_scratch) {
+             bld.scratch(aco_opcode::scratch_store_dword, Operand(v1), ctx.scratch_rsrc, elem,
+                         offset, memory_sync_info(storage_vgpr_spill, semantic_private));
+             offset += 4;
+@@ -1410,7 +1410,7 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
+       }
+    } else if (lds_slots) {
+       bld.ds(aco_opcode::ds_write_addtid_b32, bld.m0(ctx.lds_m0_zero), temp, lds_offset);
+-   } else if (ctx.program->gfx_level >= GFX9) {
++   } else if (!ctx.program->dev.mubuf_scratch) {
+       bld.scratch(aco_opcode::scratch_store_dword, Operand(v1), ctx.scratch_rsrc, temp, offset,
+                   memory_sync_info(storage_vgpr_spill, semantic_private));
+    } else {
+@@ -1460,7 +1460,7 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
+             bld.ds(aco_opcode::ds_read_addtid_b32, Definition(tmp), bld.m0(ctx.lds_m0_zero),
+                    lds_offset);
+             lds_offset += workgroup_size * 4;
+-         } else if (ctx.program->gfx_level >= GFX9) {
++         } else if (!ctx.program->dev.mubuf_scratch) {
+             bld.scratch(aco_opcode::scratch_load_dword, Definition(tmp), Operand(v1),
+                         ctx.scratch_rsrc, offset,
+                         memory_sync_info(storage_vgpr_spill, semantic_private));
+@@ -1477,7 +1477,7 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
+       bld.insert(vec);
+    } else if (lds_slots) {
+       bld.ds(aco_opcode::ds_read_addtid_b32, def, bld.m0(ctx.lds_m0_zero), lds_offset);
+-   } else if (ctx.program->gfx_level >= GFX9) {
++   } else if (!ctx.program->dev.mubuf_scratch) {
+       bld.scratch(aco_opcode::scratch_load_dword, def, Operand(v1), ctx.scratch_rsrc, offset,
+                   memory_sync_info(storage_vgpr_spill, semantic_private));
+    } else {
+@@ -1916,7 +1916,7 @@ spill(Program* program)
+       extra_vgprs = DIV_ROUND_UP(sgpr_spills * 2, program->wave_size) + 1;
+    /* add extra SGPRs required for spilling VGPRs */
+    if (demand.vgpr + extra_vgprs > limit.vgpr || program->max_call_spills.vgpr) {
+-      if (program->gfx_level >= GFX9)
++      if (!program->dev.mubuf_scratch)
+          extra_sgprs =
+             program->stack_ptr.id() ? 2 : 1; /* SADDR + scc for stack pointer additions */
+       else
+diff --git a/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp b/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
+index 251fc151890..19f041d504b 100644
+--- a/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
++++ b/src/amd/compiler/instruction_selection/aco_isel_helpers.cpp
+@@ -797,7 +797,7 @@ add_startpgm(struct isel_context* ctx, bool is_callee)
+ 
+    /* epilog has no scratch */
+    if (ctx->args->scratch_offset.used) {
+-      if (ctx->program->gfx_level < GFX9) {
++      if (ctx->program->dev.mubuf_scratch) {
+          /* Stash these in the program so that they can be accessed later when
+           * handling spilling.
+           */
+diff --git a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+index e36562d0774..c3ae6f592c1 100644
+--- a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
++++ b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+@@ -3282,10 +3282,10 @@ visit_load_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
+    info.align_mul = nir_intrinsic_align_mul(instr);
+    info.align_offset = nir_intrinsic_align_offset(instr);
+    info.cache = get_cache_flags(ctx, ACCESS_IS_SWIZZLED_AMD, ac_access_type_load);
+-   info.swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 0;
++   info.swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 0;
+    info.sync = memory_sync_info(storage_scratch, semantic_private);
+    info.disable_wqm = nir_intrinsic_access(instr) & ACCESS_SKIP_HELPERS;
+-   if (ctx->program->gfx_level >= GFX9) {
++   if (!ctx->program->dev.mubuf_scratch) {
+       if (nir_src_is_const(instr->src[0])) {
+          info.const_offset = nir_src_as_uint(instr->src[0]);
+          if (ctx->program->stack_ptr.id())
+@@ -3329,12 +3329,12 @@ visit_store_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
+    unsigned write_count = 0;
+    Temp write_datas[32];
+    unsigned offsets[32];
+-   unsigned swizzle_component_size = ctx->program->gfx_level <= GFX8 ? 4 : 16;
++   unsigned swizzle_component_size = ctx->program->dev.mubuf_scratch ? 4 : 16;
+    split_buffer_store(ctx, nir_intrinsic_align_mul(instr), nir_intrinsic_align_offset(instr), false,
+                       RegType::vgpr, data, writemask, swizzle_component_size, &write_count,
+                       write_datas, offsets);
+ 
+-   if (ctx->program->gfx_level >= GFX9) {
++   if (!ctx->program->dev.mubuf_scratch) {
+       uint32_t max = ctx->program->dev.scratch_global_offset_max + 1;
+       offset = nir_src_is_const(instr->src[1]) ? Temp(0, s1) : offset;
+       uint32_t base_const_offset =
+diff --git a/src/amd/vulkan/nir/radv_nir_rt_common.c b/src/amd/vulkan/nir/radv_nir_rt_common.c
+index 555c8a25613..079f4b4e225 100644
+--- a/src/amd/vulkan/nir/radv_nir_rt_common.c
++++ b/src/amd/vulkan/nir/radv_nir_rt_common.c
+@@ -410,9 +410,11 @@ build_node_to_addr(const struct radv_compiler_info *compiler_info, nir_builder *
+ {
+    nir_def *addr = skip_type_and ? node : nir_iand_imm(b, node, ~7ull);
+    addr = nir_ishl_imm(b, addr, 3);
+-   /* Assumes everything is in the top half of address space, which is true in
+-    * GFX9+ for now. */
+-   return compiler_info->ac->gfx_level >= GFX9 ? nir_ior_imm(b, addr, 0xffffull << 48) : addr;
++   /* The node holds address bits 3-47: sign-extend bit 47 into the canonical
++    * address, as node_to_addr does for the builders. A GFX9+ address may be in
++    * either half: amdgpu places buffers in the top half, other platforms (the
++    * PS5, whose GPU addresses are its CPU addresses) in the bottom one. */
++   return compiler_info->ac->gfx_level >= GFX9 ? nir_ishr_imm(b, nir_ishl_imm(b, addr, 16), 16) : addr;
+ }
+ 
+ nir_def *
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index ccdecdfe34c..e0f3246965f 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -1480,7 +1480,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+          goto fail;
+    }
+ 
+-   if (pdev->info.gfx_level == GFX10_3) {
++   if (pdev->info.gfx_level == GFX10_3 && pdev->info.has_vrs) {
+       if (os_get_option("RADV_FORCE_VRS_CONFIG_FILE")) {
+          const char *file = radv_get_force_vrs_config_file();
+ 
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index dabef36840d..518eb5a1d16 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -62,7 +62,8 @@ radv_perf_query_supported(const struct radv_physical_device *pdev)
+    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+ 
+    /* SQTT / SPM interfere with the register states for perf counters. */
+-   return (pdev->info.gfx_level == GFX10_3 ||
++   return pdev->info.has_perf_counters &&
++          (pdev->info.gfx_level == GFX10_3 ||
+            (pdev->info.gfx_level >= GFX11 && pdev->info.gfx_level < GFX12)) &&
+           !(instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
+ }
+@@ -167,7 +168,7 @@ radv_graphics_queue_enabled(const struct radv_physical_device *pdev)
+ static bool
+ radv_vrs_attachment_enabled(const struct radv_physical_device *pdev)
+ {
+-   return pdev->info.gfx_level >= GFX11 || pdev->use_hiz;
++   return pdev->info.has_vrs && (pdev->info.gfx_level >= GFX11 || pdev->use_hiz);
+ }
+ 
+ static bool
+@@ -263,6 +264,15 @@ radv_enable_rt(const struct radv_physical_device *pdev)
+    return true;
+ }
+ 
++/* Ray tracing pipelines call their shaders with a stack in scratch, which
++ * ACO's calling convention addresses with scratch_* instructions on GFX9+:
++ * where a shader cannot set FLAT_SCRATCH, only ray queries are reported. */
++bool
++radv_rt_pipelines_enabled(const struct radv_physical_device *pdev)
++{
++   return radv_enable_rt(pdev) && (pdev->info.gfx_level < GFX9 || pdev->info.compiler_info.has_flat_scratch);
++}
++
+ bool
+ radv_emulate_rt(const struct radv_physical_device *pdev)
+ {
+@@ -734,8 +744,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+       .KHR_external_semaphore = true,
+       .KHR_external_semaphore_fd = pdev->has_external_fd,
+       .KHR_format_feature_flags2 = true,
+-      .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
+-      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
++      .KHR_fragment_shader_barycentric = pdev->info.has_ps_strict_vertex_order,
++      .KHR_fragment_shading_rate = pdev->info.has_vrs,
+       .KHR_get_memory_requirements2 = true,
+       .KHR_global_priority = true,
+       .KHR_image_format_list = true,
+@@ -773,7 +783,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+       .KHR_push_descriptor = true,
+       .KHR_ray_query = radv_enable_rt(pdev),
+       .KHR_ray_tracing_maintenance1 = radv_enable_rt(pdev),
+-      .KHR_ray_tracing_pipeline = radv_enable_rt(pdev),
++      .KHR_ray_tracing_pipeline = radv_rt_pipelines_enabled(pdev),
+       .KHR_ray_tracing_position_fetch = radv_enable_rt(pdev),
+       .KHR_relaxed_block_layout = true,
+       .KHR_robustness2 = true,
+@@ -912,7 +922,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+ #endif
+       .EXT_pipeline_creation_cache_control = true,
+       .EXT_pipeline_creation_feedback = true,
+-      .EXT_pipeline_library_group_handles = radv_enable_rt(pdev),
++      .EXT_pipeline_library_group_handles = radv_rt_pipelines_enabled(pdev),
+       .EXT_pipeline_protected_access = radv_tmz_enabled(pdev),
+       .EXT_pipeline_robustness = !pdev->use_llvm,
+       .EXT_post_depth_coverage = pdev->info.gfx_level >= GFX10,
+@@ -1118,7 +1128,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .hostQueryReset = true,
+       .timelineSemaphore = pdev->info.has_timeline_syncobj,
+       .bufferDeviceAddress = true,
+-      .bufferDeviceAddressCaptureReplay = true,
++      .bufferDeviceAddressCaptureReplay = pdev->info.has_replayable_va,
+       .bufferDeviceAddressMultiDevice = false,
+       .vulkanMemoryModel = true,
+       .vulkanMemoryModelDeviceScope = true,
+@@ -1258,8 +1268,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .mutableDescriptorType = true,
+ 
+       /* VK_KHR_fragment_shading_rate */
+-      .pipelineFragmentShadingRate = true,
+-      .primitiveFragmentShadingRate = true,
++      .pipelineFragmentShadingRate = pdev->info.has_vrs,
++      .primitiveFragmentShadingRate = pdev->info.has_vrs,
+       .attachmentFragmentShadingRate = radv_vrs_attachment_enabled(pdev),
+ 
+       /* VK_KHR_workgroup_memory_explicit_layout */
+@@ -1282,7 +1292,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+ 
+       /* VK_KHR_acceleration_structure */
+       .accelerationStructure = true,
+-      .accelerationStructureCaptureReplay = true,
++      .accelerationStructureCaptureReplay = pdev->info.has_replayable_va,
+       .accelerationStructureIndirectBuild = false,
+       .accelerationStructureHostCommands = false,
+       .descriptorBindingAccelerationStructureUpdateAfterBind = true,
+@@ -1334,18 +1344,18 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .rayQuery = true,
+ 
+       /* VK_EXT_pipeline_library_group_handles */
+-      .pipelineLibraryGroupHandles = true,
++      .pipelineLibraryGroupHandles = radv_rt_pipelines_enabled(pdev),
+ 
+       /* VK_KHR_ray_tracing_pipeline */
+-      .rayTracingPipeline = true,
+-      .rayTracingPipelineShaderGroupHandleCaptureReplay = true,
++      .rayTracingPipeline = radv_rt_pipelines_enabled(pdev),
++      .rayTracingPipelineShaderGroupHandleCaptureReplay = radv_rt_pipelines_enabled(pdev) && pdev->info.has_replayable_va,
+       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
+-      .rayTracingPipelineTraceRaysIndirect = pdev->info.gfx_level >= GFX7,
+-      .rayTraversalPrimitiveCulling = true,
++      .rayTracingPipelineTraceRaysIndirect = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
++      .rayTraversalPrimitiveCulling = radv_rt_pipelines_enabled(pdev),
+ 
+       /* VK_KHR_ray_tracing_maintenance1 */
+       .rayTracingMaintenance1 = true,
+-      .rayTracingPipelineTraceRaysIndirect2 = radv_enable_rt(pdev) && pdev->info.gfx_level >= GFX7,
++      .rayTracingPipelineTraceRaysIndirect2 = radv_rt_pipelines_enabled(pdev) && pdev->info.gfx_level >= GFX7,
+ 
+       /* VK_KHR_ray_tracing_position_fetch */
+       .rayTracingPositionFetch = true,
+@@ -1360,7 +1370,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .meshShader = taskmesh_en,
+       .taskShader = taskmesh_en,
+       .multiviewMeshShader = taskmesh_en,
+-      .primitiveFragmentShadingRateMeshShader = taskmesh_en,
++      .primitiveFragmentShadingRateMeshShader = taskmesh_en && pdev->info.has_vrs,
+       .meshShaderQueries = false,
+ 
+       /* VK_EXT_depth_clip_control */
+@@ -1433,7 +1443,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+ 
+       /* VK_EXT_descriptor_buffer */
+       .descriptorBuffer = true,
+-      .descriptorBufferCaptureReplay = true,
++      .descriptorBufferCaptureReplay = pdev->info.has_replayable_va,
+       .descriptorBufferImageLayoutIgnored = true,
+       .descriptorBufferPushDescriptors = true,
+ 
+@@ -1455,7 +1465,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .dynamicRenderingUnusedAttachments = true,
+ 
+       /* VK_KHR_fragment_shader_barycentric */
+-      .fragmentShaderBarycentric = true,
++      .fragmentShaderBarycentric = pdev->info.has_ps_strict_vertex_order,
+ 
+       /* VK_EXT_depth_bias_control */
+       .depthBiasControl = true,
+@@ -1658,7 +1668,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+ 
+       /* VK_EXT_descriptor_heap */
+       .descriptorHeap = true,
+-      .descriptorHeapCaptureReplay = true,
++      .descriptorHeapCaptureReplay = pdev->info.has_replayable_va,
+ 
+       /* VK_KHR_shader_constant_data */
+       .shaderConstantData = true,
+@@ -1792,7 +1802,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+ 
+    VkShaderStageFlags taskmesh_stages =
+       radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
+-   VkShaderStageFlags rt_stages = radv_enable_rt(pdev) ? RADV_RT_STAGE_BITS : 0;
++   VkShaderStageFlags rt_stages = radv_rt_pipelines_enabled(pdev) ? RADV_RT_STAGE_BITS : 0;
+ 
+    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
+    bool gfx11plus = pdev->info.gfx_level >= GFX11;
+diff --git a/src/amd/vulkan/radv_physical_device.h b/src/amd/vulkan/radv_physical_device.h
+index 30d361591b0..647976007b1 100644
+--- a/src/amd/vulkan/radv_physical_device.h
++++ b/src/amd/vulkan/radv_physical_device.h
+@@ -266,6 +266,8 @@ bool radv_host_image_copy_enabled(const struct radv_physical_device *pdev);
+ 
+ bool radv_enable_rt(const struct radv_physical_device *pdev);
+ 
++bool radv_rt_pipelines_enabled(const struct radv_physical_device *pdev);
++
+ bool radv_emulate_rt(const struct radv_physical_device *pdev);
+ 
+ bool radv_use_bvh8(const struct radv_physical_device *pdev);
+diff --git a/src/amd/vulkan/radv_pipeline.c b/src/amd/vulkan/radv_pipeline.c
+index 6e48fa1205a..7ee823145a2 100644
+--- a/src/amd/vulkan/radv_pipeline.c
++++ b/src/amd/vulkan/radv_pipeline.c
+@@ -518,6 +518,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+          .workgroup_size = stage->info.workgroup_size,
+          .use_llvm = use_llvm,
+          .load_grid_size_from_user_sgpr = compiler_info->key.load_grid_size_from_user_sgpr,
++         .no_cs_wave_id = !compiler_info->ac->has_cs_wave_id,
+       });
+    NIR_PASS(_, stage->nir, radv_nir_lower_abi, gfx_level, stage, gfx_state, compiler_info->hw.address32_hi);
+ 
+@@ -1000,6 +1001,12 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
+ static VkResult
+ radv_copy_representation(void *data, size_t *data_size, const char *src)
+ {
++   /* A representation that was not recorded (ACO's IR and disassembly are
++    * printed through open_memstream, which a platform may lack) reads as
++    * empty text. */
++   if (!src)
++      src = "";
++
+    size_t total_size = strlen(src) + 1;
+ 
+    if (!data) {
+@@ -1056,15 +1063,17 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
+    }
+    ++p;
+ 
+-   /* Disassembler */
+-   if (p < end && shader->dbg.disasm_string) {
+-      p->isText = true;
+-      VK_COPY_STR(p->name, "Assembly");
+-      VK_COPY_STR(p->description, "Final Assembly");
+-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
+-         result = VK_INCOMPLETE;
++   /* Disassembler: only when there is one (ACO disassembles through LLVM). */
++   if (shader->dbg.disasm_string) {
++      if (p < end) {
++         p->isText = true;
++         VK_COPY_STR(p->name, "Assembly");
++         VK_COPY_STR(p->description, "Final Assembly");
++         if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
++            result = VK_INCOMPLETE;
++      }
++      ++p;
+    }
+-   ++p;
+ 
+    if (!pInternalRepresentations)
+       *pInternalRepresentationCount = p - pInternalRepresentations;
+diff --git a/src/amd/vulkan/radv_shader_info.c b/src/amd/vulkan/radv_shader_info.c
+index 1d201ac97b7..968c98cd67a 100644
+--- a/src/amd/vulkan/radv_shader_info.c
++++ b/src/amd/vulkan/radv_shader_info.c
+@@ -415,7 +415,7 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
+ }
+ 
+ static void
+-radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
++radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_shader *nir,
+                          const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
+                          bool export_prim_id, bool export_clip_cull_dists)
+ {
+@@ -429,8 +429,9 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
+    /* Implicit primitive ID for VS and TES is added by ac_nir_lower_legacy_vs / ac_nir_lower_ngg,
+     * it can be configured as either a per-vertex or per-primitive output depending on the GPU.
+     */
++   const enum amd_gfx_level gfx_level = ac->gfx_level;
+    const bool implicit_prim_id_per_prim =
+-      export_prim_id && info->is_ngg && gfx_level >= GFX10_3 && nir->info.stage == MESA_SHADER_VERTEX;
++      export_prim_id && info->is_ngg && ac->has_ngg_per_prim_params && nir->info.stage == MESA_SHADER_VERTEX;
+    const bool implicit_prim_id_per_vertex =
+       export_prim_id && !implicit_prim_id_per_prim &&
+       (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL);
+@@ -1406,7 +1407,7 @@ radv_link_shaders_info(const struct radv_compiler_info *compiler_info, struct ra
+       const bool ps_prim_id_in = !fs_stage || fs_stage->info.ps.prim_id_input;
+       const bool ps_clip_dists_in = !fs_stage || !!fs_stage->info.ps.input_clips_culls_mask;
+ 
+-      radv_set_vs_output_param(compiler_info->ac->gfx_level, prerast_stage->nir, gfx_state, &prerast_stage->info,
++      radv_set_vs_output_param(compiler_info->ac, prerast_stage->nir, gfx_state, &prerast_stage->info,
+                                ps_prim_id_in, ps_clip_dists_in);
+    }
+ 
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 54a130a8c45..d7442f2650b 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -14,6 +14,7 @@
+ #include "addrlib/src/amdgpu_asic_addr.h"
+ #include "tools/radv_debug.h"
+ #include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "util/u_atomic.h"
+ #include "util/u_math.h"
+ #include "ac_linux_drm.h"
+@@ -141,7 +142,12 @@ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs
+  * compute units of 40) and the render-backend layout. Probe S3 measures them;
+  * until then they only size scratch and a few hardware limits. */
+ #define RADV_PS5_EXTERNAL_REV 0x28 /* the NAVI21 range: GFX10.3 */
+-#define RADV_PS5_ADDRLIB_REV 0x03  /* the NAVI10 range: AddrLib's non-RB+ GFX10 swizzles */
++/* GFX1013's range: AddrLib's non-RB+ GFX10 swizzles, with the depth/stencil
++ * mipmap fix Navi10 lacks. With a Navi10 revision a 256x256 D16 image with
++ * mips was laid out in three 64 KiB blocks, its 128x128 level in the mip
++ * tail, while the depth block wrote level 0 into a fourth (a write past the
++ * image: dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_*). */
++#define RADV_PS5_ADDRLIB_REV 0x82
+ #define RADV_PS5_GB_ADDR_CONFIG 0x00100044
+ 
+ static void
+@@ -228,6 +234,30 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
+     * RADV smoke title's geometry and tessellation checks). */
+    info->compiler_info.has_accelerated_dot_product = false;
++   /* Every wave of a shader using scratch_* instructions faulted (MEMVIOL) a
++    * few instructions in, where it had set FLAT_SCRATCH with s_setreg; the
++    * same shaders through buffer instructions, as on GFX8, run (the smoke
++    * title's scratch checks, graphicsfuzz's large private arrays). */
++   info->compiler_info.has_flat_scratch = false;
++   /* A 128-invocation workgroup of wave64 reported one subgroup where two ran
++    * (dEQP-VK.subgroups.multiple_dispatches.uniform_subgroup_size): TG_SIZE's
++    * GFX10.3 wave ID (bits 20-24) reads 0, as on GFX10.1, whose ordered wave
++    * ID serves instead. */
++   info->compiler_info.has_cs_wave_id = false;
++   /* A fragment shader reading gl_PrimitiveID that no earlier stage writes read
++    * 0 for every primitive behind an NGG vertex shader, which exports it as a
++    * per-primitive parameter on GFX10.3 (dEQP-VK.pipeline.*.misc.
++    * implicit_primitive_id; the RADV smoke title's primitive ID check). The
++    * legacy vertex shader's per-vertex ID read 0 and 1 as it should; the
++    * parameter cache is GFX10.1's, so the ID goes per vertex here too. */
++   info->compiler_info.has_ngg_per_prim_params = false;
++   /* Every acceleration structure build faulted the GPU (a write to an
++    * unmapped page far past every buffer the process had, even for an empty
++    * top level: dEQP-VK.ray_query.acceleration_structures.empty.*.gpu_built),
++    * and host builds are not offered, so no ray tracing is reported until the
++    * build runs. RADV_PS5_RAY_TRACING=1 reports it anyway, to probe the
++    * build. */
++   info->compiler_info.has_image_bvh_intersect_ray = debug_get_bool_option("RADV_PS5_RAY_TRACING", false);
+ 
+    /* What the console's layout needs beyond the NAVI21 defaults. */
+    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
+@@ -239,6 +269,25 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
+     * the command buffers device-generated commands write cannot run. */
+    info->has_gpu_written_ibs = false;
++   /* No exported function holds the GPU at a stable power state
++    * (radv_ps5_ctx_set_pstate refuses every state but none), so the profiling
++    * lock VK_KHR_performance_query takes always failed
++    * (dEQP-VK.query_pool.performance_query.*: VK_ERROR_UNKNOWN). */
++   info->has_perf_counters = false;
++   /* The second of two triangles read its per-vertex inputs rotated, (v5, v3,
++    * v4) for (v3, v4, v5), with or without ROTATE_PC_PTR: this GPU's
++    * parameter cache is GFX10.1's, which upstream RADV does not report
++    * VK_KHR_fragment_shader_barycentric for (the RADV smoke title's
++    * barycentric pair; dEQP-VK.fragment_shading_barycentric.data, triangles). */
++   info->has_ps_strict_vertex_order = false;
++   /* A triangle over a 256x256 target drawn at a 2x2 pipeline shading rate
++    * ran its fragment shader 65536 times, once a texel, and every invocation
++    * read gl_ShadingRateEXT as 1x1 (the RADV smoke title's shading-rate
++    * check); dEQP-VK.fragment_shading_rate failed every case whose combined
++    * rate is coarser than 1x1, from the pipeline, the primitive or an
++    * attachment. The rasterizer is GFX10.1's, without variable-rate shading,
++    * so VK_KHR_fragment_shading_rate is not reported. */
++   info->has_vrs = false;
+    info->rbplus_allowed = false;
+    /* A depth-only image cleared to 0 read back 1 after a draw whose
+     * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
+@@ -256,6 +305,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    info->has_timeline_syncobj = true;
+    info->kernel_has_modifiers = false;
+    info->has_sparse = false;
++   /* A buffer lives where the platform's direct-memory allocator puts it, and
++    * radv_ps5_buffer_create refuses a replay address, so no capture and
++    * replay feature can hold: dEQP-VK.binding_model.buffer_device_address's
++    * replay cases (723) all failed while bufferDeviceAddressCaptureReplay was
++    * reported. */
++   info->has_replayable_va = false;
+    info->has_sparse_image_3d = false;
+    info->has_vm_always_valid = true;
+    /* buffer_from_ptr imports nothing yet: whether a CPU allocation can be

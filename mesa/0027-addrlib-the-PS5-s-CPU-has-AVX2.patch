@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Fri, 9 Oct 2026 20:25:36 +0000
+Subject: [PATCH] addrlib: the PS5's CPU has AVX2
+
+addrlib picks its AVX2 copy routines with __builtin_cpu_supports(), which
+reads compiler-rt's __cpu_model. The PS5 payload SDK links no compiler-rt,
+so a shared library using addrlib does not link there. The console's Zen 2
+cores always have AVX2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ src/amd/addrlib/src/core/addrswizzlersimd.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/amd/addrlib/src/core/addrswizzlersimd.h b/src/amd/addrlib/src/core/addrswizzlersimd.h
+index fd53e4080a3..39dcb8829cf 100644
+--- a/src/amd/addrlib/src/core/addrswizzlersimd.h
++++ b/src/amd/addrlib/src/core/addrswizzlersimd.h
+@@ -84,6 +84,10 @@ static inline bool CpuSupportsAvx2() {
+     // Use compiler builtins to check for support
+ #if _MSC_VER
+     return IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
++#elif defined(__PROSPERO__)
++    // The PS5's Zen 2 cores have AVX2; and __builtin_cpu_supports() needs
++    // compiler-rt's __cpu_model, which the PS5 payload SDK does not link.
++    return true;
+ #elif defined(__GNUC__)
+     return __builtin_cpu_supports("avx2");
+ #else

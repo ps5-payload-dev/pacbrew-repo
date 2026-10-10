@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:41 +0000
+Subject: [PATCH] radv/ps5: submission timing, CLFLUSHOPT and the suspend
+ thread
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  a989e3e9d3f radv/ps5: a line every 10 s on where submissions' time goes
+  1538d3032c9 radv/ps5: the CPU flush uses CLFLUSHOPT
+  fde48a3b031 radv/ps5: the suspend point is made by a thread of its own
+---
+ src/amd/vulkan/winsys/ps5/radv_ps5_cs.c       | 34 ++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 79 ++++++++++++++++++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |  5 ++
+ 3 files changed, 114 insertions(+), 4 deletions(-)
+
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+index 6cd6d47a665..3251c09c664 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+@@ -6,6 +6,7 @@
+ 
+ #include "radv_ps5_winsys.h"
+ 
++#include <inttypes.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -500,6 +501,35 @@ radv_ps5_copy_streams(uint32_t *at, struct ac_cmdbuf **streams, unsigned count)
+    return at;
+ }
+ 
++/* Where the submissions' time goes: a line on stderr every 10 s of a queue
++ * that submits (held with the submit lock). */
++static struct {
++   uint64_t window_start, count, words, claim_ns, copy_ns;
++} radv_ps5_submit_window;
++
++static void
++radv_ps5_note_submission(uint32_t words, uint64_t claim_ns, uint64_t copy_ns)
++{
++   const uint64_t now = os_time_get_nano();
++   if (!radv_ps5_submit_window.window_start)
++      radv_ps5_submit_window.window_start = now;
++   radv_ps5_submit_window.count++;
++   radv_ps5_submit_window.words += words;
++   radv_ps5_submit_window.claim_ns += claim_ns;
++   radv_ps5_submit_window.copy_ns += copy_ns;
++   if (now - radv_ps5_submit_window.window_start < 10ull * 1000 * 1000 * 1000)
++      return;
++   uint64_t times[3];
++   radv_ps5_submit_times(times);
++   fprintf(stderr,
++           "radv/ps5 submissions: window count=%" PRIu64 " kwords=%" PRIu64 " claim_ms=%.1f copy_ms=%.1f flush_ms=%.1f"
++           " agc_ms=%.1f suspend_ms=%.1f\n",
++           radv_ps5_submit_window.count, radv_ps5_submit_window.words / 1024, radv_ps5_submit_window.claim_ns / 1e6,
++           radv_ps5_submit_window.copy_ns / 1e6, times[0] / 1e6, times[1] / 1e6, times[2] / 1e6);
++   memset(&radv_ps5_submit_window, 0, sizeof(radv_ps5_submit_window));
++   radv_ps5_submit_window.window_start = now;
++}
++
+ static VkResult
+ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_submit_info *submit, uint32_t wait_count,
+                    const struct vk_sync_wait *waits, uint32_t signal_count, const struct vk_sync_signal *signals)
+@@ -594,7 +624,9 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
+    }
+ 
+    const uint64_t seq = queue->submitted_seq + 1;
++   const uint64_t claim_start = os_time_get_nano();
+    uint32_t *const words = too_large ? NULL : radv_ps5_queue_claim(queue, count, seq);
++   const uint64_t copy_start = os_time_get_nano();
+    if (!words) {
+       simple_mtx_unlock(&queue->submit_lock);
+       util_dynarray_fini(&pieces);
+@@ -628,6 +660,7 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
+    util_dynarray_fini(&pieces);
+    util_dynarray_fini(&units);
+ 
++   const uint64_t copy_end = os_time_get_nano();
+    p_atomic_set(&queue->submitted_seq, seq);
+    int submitted = 0;
+    const unsigned parts = util_dynarray_num_elements(&starts, uint32_t);
+@@ -637,6 +670,7 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
+       submitted = radv_ps5_submit(words + start, end - start, queue->marker, (uint32_t)seq);
+    }
+    util_dynarray_fini(&starts);
++   radv_ps5_note_submission(count, copy_start - claim_start, copy_end - copy_start);
+    simple_mtx_unlock(&queue->submit_lock);
+    if (submitted != 0) {
+       fprintf(stderr, "radv/ps5: sceAgcDriverSubmitDcb failed: 0x%08x\n", (unsigned)submitted);
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 53c323bd059..98783e37036 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -16,7 +16,9 @@
+ 
+ #include "c11/threads.h"
+ #include "util/macros.h"
++#include "util/os_time.h"
+ #include "util/simple_mtx.h"
++#include "util/u_atomic.h"
+ #include "util/u_math.h"
+ 
+ #if defined(__PROSPERO__)
+@@ -178,9 +180,13 @@ radv_ps5_cpu_flush(const void *address, size_t bytes)
+    const uintptr_t line = 64;
+    uintptr_t at = (uintptr_t)address & ~(line - 1);
+    const uintptr_t end = (uintptr_t)address + bytes;
++   /* CLFLUSHOPT (Zen 2 has it): the lines are written back and dropped as
++    * CLFLUSH does, but not one after another; the closing MFENCE orders them
++    * before every later store and load (a submission, or a read of what the
++    * GPU wrote). A submission's words took one serialising CLFLUSH a line. */
+    __builtin_ia32_mfence();
+    for (; at < end; at += line)
+-      __builtin_ia32_clflush((const void *)at);
++      __asm__ volatile("clflushopt %0" : "+m"(*(volatile char *)at));
+    __builtin_ia32_mfence();
+ }
+ 
+@@ -642,22 +648,81 @@ radv_ps5_memory_free(struct radv_ps5_memory *memory)
+    *memory = (struct radv_ps5_memory){.physical = -1};
+ }
+ 
++/* Where radv_ps5_submit's time went (radv_ps5_submit_times); [2] is the kick
++ * thread's. */
++static uint64_t radv_ps5_submit_ns[3];
++
++/* Without a suspend point after it the console starts a submission up to a
++ * refresh late (PS5_Vulkan R68), and the suspend point took about 0.3 ms a
++ * submission of the submitting thread (RPCS3's renderer: 2,000 of them in
++ * 10 s). A thread of its own makes it instead, as soon as a submission is
++ * made; submissions made while it is at one share the next. */
++static mtx_t radv_ps5_kick_lock;
++static cnd_t radv_ps5_kick_wanted;
++static bool radv_ps5_kick_pending;
++static once_flag radv_ps5_kick_once = ONCE_FLAG_INIT;
++
++static int
++radv_ps5_kick_body(void *unused)
++{
++   (void)unused;
++   mtx_lock(&radv_ps5_kick_lock);
++   for (;;) {
++      while (!radv_ps5_kick_pending)
++         cnd_wait(&radv_ps5_kick_wanted, &radv_ps5_kick_lock);
++      radv_ps5_kick_pending = false;
++      mtx_unlock(&radv_ps5_kick_lock);
++      const uint64_t started = os_time_get_nano();
++      const int32_t result = sceAgcSuspendPoint();
++      p_atomic_add(&radv_ps5_submit_ns[2], os_time_get_nano() - started);
++      if (result != 0)
++         fprintf(stderr, "radv/ps5: sceAgcSuspendPoint failed: 0x%08x\n", (unsigned)result);
++      mtx_lock(&radv_ps5_kick_lock);
++   }
++   return 0;
++}
++
++static void
++radv_ps5_kick_start(void)
++{
++   mtx_init(&radv_ps5_kick_lock, mtx_plain);
++   cnd_init(&radv_ps5_kick_wanted);
++   thrd_t thread;
++   if (thrd_create(&thread, radv_ps5_kick_body, NULL) == thrd_success)
++      thrd_detach(thread);
++}
++
+ int
+ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value)
+ {
+    (void)marker;
+    (void)marker_value;
++   const uint64_t started = os_time_get_nano();
+    radv_ps5_cpu_flush(words, (size_t)count * sizeof(uint32_t));
++   const uint64_t flushed = os_time_get_nano();
+    struct ps5_agc_submit_description description = {
+       .words = words,
+       .word_count = count,
+    };
+    int32_t result = sceAgcDriverSubmitDcb(&description);
++   const uint64_t submitted = os_time_get_nano();
++   radv_ps5_submit_ns[0] += flushed - started;
++   radv_ps5_submit_ns[1] += submitted - flushed;
+    if (result != 0)
+       return result;
+-   /* Without the suspend point the console starts a submission up to a
+-    * refresh late (PS5_Vulkan R68). */
+-   return sceAgcSuspendPoint();
++   call_once(&radv_ps5_kick_once, radv_ps5_kick_start);
++   mtx_lock(&radv_ps5_kick_lock);
++   radv_ps5_kick_pending = true;
++   cnd_signal(&radv_ps5_kick_wanted);
++   mtx_unlock(&radv_ps5_kick_lock);
++   return 0;
++}
++
++void
++radv_ps5_submit_times(uint64_t times[3])
++{
++   for (unsigned i = 0; i < 3; i++)
++      times[i] = p_atomic_xchg(&radv_ps5_submit_ns[i], 0);
+ }
+ 
+ int
+@@ -920,6 +985,12 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
+    return 0;
+ }
+ 
++void
++radv_ps5_submit_times(uint64_t times[3])
++{
++   times[0] = times[1] = times[2] = 0;
++}
++
+ int
+ radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
+ {
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 1702bc473d7..68bdeb35a7c 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -102,6 +102,11 @@ void radv_ps5_cpu_flush(const void *address, size_t bytes);
+  * been flushed). The words end with a packet that writes marker_value to
+  * marker once they have run; the host model writes it at once. */
+ int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value);
++
++/* The nanoseconds radv_ps5_submit spent since the last call, in the cache
++ * flush, in sceAgcDriverSubmitDcb and in sceAgcSuspendPoint (called with the
++ * submit lock held, as radv_ps5_submit is). */
++void radv_ps5_submit_times(uint64_t times[3]);
+ /* The tessellation factor ring the GPU uses from the next submission on (AGC
+  * owns its registers); 0 or the system software's error. */
+ int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);

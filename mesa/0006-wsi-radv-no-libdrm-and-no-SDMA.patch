@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:37 +0000
+Subject: [PATCH] wsi, radv: no libdrm and no SDMA
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  a562e4696ba wsi/headless: CPU images without libdrm
+  40834f26349 radv: WSI blits on an SDMA queue only where there is SDMA
+---
+ src/amd/vulkan/radv_wsi.c            | 5 ++++-
+ src/vulkan/wsi/wsi_common_headless.c | 8 ++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/amd/vulkan/radv_wsi.c b/src/amd/vulkan/radv_wsi.c
+index 5c8dfb1acb1..472b92ff5e9 100644
+--- a/src/amd/vulkan/radv_wsi.c
++++ b/src/amd/vulkan/radv_wsi.c
+@@ -52,7 +52,10 @@ radv_wsi_get_prime_blit_queue(VkDevice _device)
+       return &device->private_sdma_queue->vk;
+    }
+ 
+-   if (pdev->info.gfx_level >= GFX9 && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
++   /* Only with an SDMA engine to run it: otherwise the blit goes with the
++    * present, on the presenting queue. */
++   if (pdev->info.gfx_level >= GFX9 && pdev->info.ip[AMD_IP_SDMA].num_queues > 0 &&
++       pdev->info.sdma_ip_version != SDMA_UNKNOWN && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
+ 
+       uint32_t queue_family_index = pdev->num_queues;
+       for (uint32_t i = 0; i < pdev->num_queues; i++) {
+diff --git a/src/vulkan/wsi/wsi_common_headless.c b/src/vulkan/wsi/wsi_common_headless.c
+index 23b375ff73b..b84d482c13a 100644
+--- a/src/vulkan/wsi/wsi_common_headless.c
++++ b/src/vulkan/wsi/wsi_common_headless.c
+@@ -489,12 +489,19 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+ 
+    struct wsi_base_image_params *image_params = NULL;
+    struct wsi_cpu_image_params cpu_params;
++#ifdef HAVE_LIBDRM
+    struct wsi_drm_image_params drm_params;
++#endif
++   /* Without libdrm there are no DRM images: a hardware driver's images are
++    * blitted to a host buffer, as a software one's are presented. */
++#ifdef HAVE_LIBDRM
+    if (wsi_device->sw) {
++#endif
+       cpu_params = (struct wsi_cpu_image_params) {
+          .base.image_type = WSI_IMAGE_TYPE_CPU,
+       };
+       image_params = &cpu_params.base;
++#ifdef HAVE_LIBDRM
+    } else {
+       drm_params = (struct wsi_drm_image_params) {
+          .base.image_type = WSI_IMAGE_TYPE_DRM,
+@@ -505,6 +512,7 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+       };
+       image_params = &drm_params.base;
+    }
++#endif
+ 
+    result = wsi_swapchain_init(wsi_device, &chain->base, device,
+                                pCreateInfo, image_params, pAllocator);

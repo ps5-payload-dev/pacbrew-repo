@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:21:55 +0000
+Subject: [PATCH] util/memstream: a temporary file where libc has no
+ open_memstream
+
+The PS5's libc has no open_memstream. Detect it (HAVE_OPEN_MEMSTREAM) and,
+where it is missing, back u_memstream with tmpfile() as on Windows. The two
+direct open_memstream callers go through u_memstream (the RADV hang report)
+or without (ac_get_umr_waves, which needs umr anyway).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ meson.build                            |  1 +
+ src/amd/common/ac_debug.c              |  2 +-
+ src/amd/vulkan/tools/radv_debug_hang.c |  9 +++++++--
+ src/util/memstream.c                   | 26 +++++++++++++++++++++-----
+ src/util/memstream.h                   | 10 +++++++++-
+ 5 files changed, 39 insertions(+), 9 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index e9f9e3e8d36..54fe19ecb23 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1644,6 +1644,7 @@ foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'sys/shm.h',
+ endforeach
+ 
+ functions_to_detect = {
++  'open_memstream': '#include <stdio.h>',
+   'strtof': '',
+   'mkostemp': '',
+   'memfd_create': '#include <sys/mman.h>',
+diff --git a/src/amd/common/ac_debug.c b/src/amd/common/ac_debug.c
+index 835cc9c3b20..eaf38af6ca6 100644
+--- a/src/amd/common/ac_debug.c
++++ b/src/amd/common/ac_debug.c
+@@ -210,7 +210,7 @@ ac_get_umr_waves(const struct radeon_info *info, enum amd_ip_type ring)
+    if (ring != AMD_IP_GFX)
+       return NULL;
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && defined(HAVE_OPEN_MEMSTREAM)
+    char *data;
+    size_t size;
+    FILE *f = open_memstream(&data, &size);
+diff --git a/src/amd/vulkan/tools/radv_debug_hang.c b/src/amd/vulkan/tools/radv_debug_hang.c
+index 9005bddcf6c..318392f31ef 100644
+--- a/src/amd/vulkan/tools/radv_debug_hang.c
++++ b/src/amd/vulkan/tools/radv_debug_hang.c
+@@ -17,6 +17,7 @@
+ 
+ #include "spirv/nir_spirv.h"
+ #include "util/mesa-blake3.h"
++#include "util/memstream.h"
+ #include "util/os_time.h"
+ #include "ac_debug.h"
+ #include "ac_descriptors.h"
+@@ -1032,12 +1033,13 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
+ 
+    for (uint32_t i = 0; i < RADV_DEVICE_FAULT_CHUNK_COUNT; i++) {
+ 
++      struct u_memstream mem;
+       if (save_hang_report) {
+          snprintf(dump_path, sizeof(dump_path), "%s/%s.log", dump_dir, chunks[i].name);
+ 
+          f = fopen(dump_path, "w+");
+       } else {
+-         f = open_memstream(&chunks[i].ptr, &chunks[i].size);
++         f = u_memstream_open(&mem, &chunks[i].ptr, &chunks[i].size) ? u_memstream_get(&mem) : NULL;
+       }
+ 
+       if (!f)
+@@ -1088,7 +1090,10 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
+          break;
+       }
+ 
+-      fclose(f);
++      if (save_hang_report)
++         fclose(f);
++      else
++         u_memstream_close(&mem);
+    }
+ 
+    free(dump_dir);
+diff --git a/src/util/memstream.c b/src/util/memstream.c
+index bd909b78ebf..743b4be9e91 100644
+--- a/src/util/memstream.c
++++ b/src/util/memstream.c
+@@ -63,6 +63,17 @@ u_memstream_open(struct u_memstream *mem, char **bufp, size_t *sizep)
+    }
+ 
+    return success;
++#elif defined(U_MEMSTREAM_TMPFILE)
++   FILE *const f = tmpfile();
++   if (!f)
++      return false;
++
++   *bufp = NULL;
++   *sizep = 0;
++   mem->f = f;
++   mem->bufp = bufp;
++   mem->sizep = sizep;
++   return true;
+ #else
+    FILE *const f = open_memstream(bufp, sizep);
+    mem->f = f;
+@@ -70,7 +81,7 @@ u_memstream_open(struct u_memstream *mem, char **bufp, size_t *sizep)
+ #endif
+ }
+ 
+-#ifdef _WIN32
++#ifdef U_MEMSTREAM_TMPFILE
+ static void
+ u_memstream_update_buffer(struct u_memstream *mem)
+ {
+@@ -84,18 +95,23 @@ u_memstream_update_buffer(struct u_memstream *mem)
+       fseek(f, 0, SEEK_SET);
+       fread(*mem->bufp, 1, size, f);
+       (*mem->bufp)[size] = '\0';
++   } else if (*mem->bufp == NULL) {
++      /* As open_memstream, an empty stream is an empty string. */
++      *mem->bufp = calloc(1, 1);
+    }
+    *mem->sizep = size;
+ }
+-#endif /* _WIN32 */
++#endif /* U_MEMSTREAM_TMPFILE */
+ 
+ void
+ u_memstream_close(struct u_memstream *mem)
+ {
+    FILE *const f = mem->f;
+ 
+-#ifdef _WIN32
++#ifdef U_MEMSTREAM_TMPFILE
+    u_memstream_update_buffer(mem);
++#endif
++#ifdef _WIN32
+    remove(mem->temp);
+ #endif
+ 
+@@ -105,10 +121,10 @@ u_memstream_close(struct u_memstream *mem)
+ int
+ u_memstream_flush(struct u_memstream *mem)
+ {
+-#ifndef _WIN32
++#ifndef U_MEMSTREAM_TMPFILE
+    return fflush(mem->f);
+ #else
+    u_memstream_update_buffer(mem);
+    return 0;
+-#endif /* _WIN32 */
++#endif /* U_MEMSTREAM_TMPFILE */
+ }
+diff --git a/src/util/memstream.h b/src/util/memstream.h
+index 42f374cd69b..9c713dd02e8 100644
+--- a/src/util/memstream.h
++++ b/src/util/memstream.h
+@@ -43,12 +43,20 @@
+ extern "C" {
+ #endif
+ 
++/* Without open_memstream (Windows, the PlayStation 5's libc), the stream is a
++ * temporary file, read back into the buffer at flush and close. */
++#if defined(_WIN32) || !defined(HAVE_OPEN_MEMSTREAM)
++#define U_MEMSTREAM_TMPFILE 1
++#endif
++
+ struct u_memstream
+ {
+    FILE *f;
+-#ifdef _WIN32
++#ifdef U_MEMSTREAM_TMPFILE
+    char **bufp;
+    size_t *sizep;
++#endif
++#ifdef _WIN32
+    char temp[PATH_MAX];
+ #endif
+ };

@@ -1,0 +1,1039 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:38 +0000
+Subject: [PATCH] radv/ps5: geometry shaders as compute for shader objects
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  c0d0222092c Merge ps5-gs-objects: geometry shaders as compute with a dynamic vertex input and for shader objects
+---
+ src/amd/vulkan/radv_cmd_buffer.c        | 103 +++++++-
+ src/amd/vulkan/radv_cmd_buffer.h        |   5 +
+ src/amd/vulkan/radv_gs_compute.c        | 156 ++++++++++--
+ src/amd/vulkan/radv_gs_compute.h        |  53 +++-
+ src/amd/vulkan/radv_pipeline_graphics.c |  23 +-
+ src/amd/vulkan/radv_shader.h            |   4 +
+ src/amd/vulkan/radv_shader_object.c     | 317 ++++++++++++++++++++++--
+ src/amd/vulkan/radv_shader_object.h     |  16 ++
+ 8 files changed, 618 insertions(+), 59 deletions(-)
+
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+index 483791523f4..cfab0838b06 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -6661,6 +6661,30 @@ radv_upload_push_constants(struct radv_cmd_buffer *cmd_buffer, const struct radv
+    *va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
+ }
+ 
++/* Shader objects run a geometry shader as compute when the geometry object
++ * has its passes and the vertex object its vertex pass, with no tessellation
++ * between them: their set, assembled in the command buffer's state. */
++static const struct radv_gs_compute_pipeline *
++radv_gs_compute_objects(struct radv_cmd_buffer *cmd_buffer)
++{
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   const struct radv_shader_object *gs = state->shader_objs[MESA_SHADER_GEOMETRY];
++   const struct radv_shader_object *vs = state->shader_objs[MESA_SHADER_VERTEX];
++
++   if (!gs || !gs->gs_compute.gs || !vs || !vs->gs_compute.vs || state->shader_objs[MESA_SHADER_TESS_CTRL] ||
++       state->shader_objs[MESA_SHADER_TESS_EVAL])
++      return NULL;
++
++   struct radv_gs_compute_pipeline *gsc = &state->gs_compute_objects;
++   *gsc = *gs->gs_compute.gs;
++   gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = NULL;
++   gsc->deferred_vs = vs->gs_compute.vs;
++   gsc->vs_outputs = vs->gs_compute.vs_outputs;
++   return gsc;
++}
++
++static const struct radv_gs_compute_pipeline *radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer);
++
+ static void
+ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stages, VkPipelineBindPoint bind_point)
+ {
+@@ -6675,8 +6699,7 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
+       /* A geometry shader run as compute has no hardware stage: its
+        * rasterization copy, which runs the shader again, is the vertex stage's
+        * (the passes take their constants at each draw). */
+-      const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
+-      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && pipeline && pipeline->base.gs_compute)
++      if ((stages & VK_SHADER_STAGE_GEOMETRY_BIT) && radv_gs_compute_bound(cmd_buffer))
+          internal_stages |= VK_SHADER_STAGE_VERTEX_BIT;
+       break;
+    }
+@@ -13658,6 +13681,7 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
+    bool need_dynamic_descriptors_offset_addr = false;
+    bool need_indirect_descriptors = false;
+    bool need_push_constants_upload = false;
++   const struct radv_gs_compute_pipeline *gs_compute = radv_gs_compute_objects(cmd_buffer);
+ 
+    for (unsigned s = 0; s <= MESA_SHADER_MESH; s++) {
+       const struct radv_shader_object *shader_obj = cmd_buffer->state.shader_objs[s];
+@@ -13671,8 +13695,18 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
+          continue;
+       }
+ 
++      /* A geometry shader run as compute has no hardware stage: its
++       * rasterization copy is the vertex stage's. */
++      if (gs_compute && s == MESA_SHADER_GEOMETRY) {
++         radv_bind_shader(cmd_buffer, NULL, s);
++         dynamic_offset_count += shader_obj->dynamic_offset_count;
++         continue;
++      }
++
+       /* Select shader variants. */
+-      if (s == MESA_SHADER_VERTEX && (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL] ||
++      if (gs_compute && s == MESA_SHADER_VERTEX) {
++         shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]->gs_compute.rast;
++      } else if (s == MESA_SHADER_VERTEX && (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL] ||
+                                       cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY])) {
+          if (cmd_buffer->state.shader_objs[MESA_SHADER_TESS_CTRL]) {
+             shader = shader_obj->as_ls.shader;
+@@ -13697,7 +13731,27 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
+       dynamic_offset_count += shader_obj->dynamic_offset_count;
+    }
+ 
+-   struct radv_shader *gs_copy_shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]
++   /* The compute passes and the vertex object's own code take constants and
++    * descriptors too. */
++   if (gs_compute) {
++      const struct radv_shader_object *vs_obj = cmd_buffer->state.shader_objs[MESA_SHADER_VERTEX];
++      const struct radv_shader *const extra[] = {
++         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)],
++         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)],
++         gs_compute->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)],
++         vs_obj->as_es.shader ? vs_obj->as_es.shader : vs_obj->shader,
++      };
++      for (unsigned i = 0; i < ARRAY_SIZE(extra); i++) {
++         if (!extra[i])
++            continue;
++         need_indirect_descriptors |= radv_shader_need_indirect_descriptors(extra[i]);
++         need_dynamic_descriptors_offset_addr |= radv_shader_need_dynamic_descriptors_offset_addr(extra[i]);
++         need_push_constants_upload |= radv_shader_need_push_constants_upload(extra[i]);
++         push_constant_size = MAX2(push_constant_size, extra[i]->info.push_constant_size);
++      }
++   }
++
++   struct radv_shader *gs_copy_shader = cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY] && !gs_compute
+                                            ? cmd_buffer->state.shader_objs[MESA_SHADER_GEOMETRY]->gs.copy_shader
+                                            : NULL;
+ 
+@@ -14264,6 +14318,35 @@ radv_gs_compute_restore_streamout(struct radv_cmd_buffer *cmd_buffer, uint64_t o
+    radeon_end();
+ }
+ 
++/* The draw's vertex input as a pipeline's state key holds it, for a vertex
++ * pass compiled at the draw (radv_gs_compute_deferred_vs). */
++static void
++radv_gs_compute_vi_key(const struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_state_key *key)
++{
++   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_physical_device *pdev = radv_device_physical(device);
++   const struct radv_vertex_input_state *vi = &cmd_buffer->state.dynamic.vertex_input;
++
++   memset(key, 0, sizeof(*key));
++   key->vi.attributes_valid = vi->attribute_mask;
++   key->vi.instance_rate_inputs = vi->instance_rate_inputs & vi->attribute_mask;
++   u_foreach_bit (i, vi->attribute_mask) {
++      const enum pipe_format format = vi->formats[i];
++      const uint32_t binding = vi->bindings[i];
++      key->vi.vertex_attribute_formats[i] = format;
++      key->vi.vertex_attribute_bindings[i] = binding;
++      key->vi.vertex_attribute_offsets[i] = vi->offsets[i];
++      if (key->vi.instance_rate_inputs & BITFIELD_BIT(i))
++         key->vi.instance_rate_divisors[i] = vi->divisors[i];
++
++      const struct ac_vtx_format_info *vtx_info =
++         ac_get_vtx_format_info(pdev->info.gfx_level, pdev->info.compiler_info.has_vtx_format_alpha_adjust_bug, format);
++      const unsigned align = vtx_info->chan_byte_size ? vtx_info->chan_byte_size : vtx_info->element_size;
++      if (vi->offsets[i] % align == 0)
++         key->vi.vertex_binding_align[binding] = MAX2(key->vi.vertex_binding_align[binding], align);
++   }
++}
++
+ /* The vertex shader, the count pass, the prefix sum of the counts, the
+  * pre-GS setup and the geometry shader proper, sized by the CPU or by the
+  * setup pass at setup_va. xfb_offsets_va holds the transform feedback
+@@ -14280,7 +14363,15 @@ radv_gs_compute_run_passes(struct radv_cmd_buffer *cmd_buffer, const struct radv
+    if (xfb_offsets_va)
+       radv_gs_compute_save_streamout(cmd_buffer, xfb_offsets_va);
+ 
+-   radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)], draw_va, vertices,
++   const struct radv_shader *vs = gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_VS)];
++   if (!vs && gsc->deferred_vs) {
++      struct radv_graphics_state_key vi_key;
++      radv_gs_compute_vi_key(cmd_buffer, &vi_key);
++      vs = radv_gs_compute_deferred_vs_get(radv_cmd_buffer_device(cmd_buffer), gsc->deferred_vs, &vi_key);
++      if (!vs)
++         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++   }
++   radv_gs_compute_dispatch(cmd_buffer, vs, draw_va, vertices,
+                             instances, vs_groups);
+    radv_gs_compute_dispatch(cmd_buffer, gsc->shaders[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)], draw_va, prims,
+                             instances, gs_groups);
+@@ -14511,7 +14602,7 @@ static const struct radv_gs_compute_pipeline *
+ radv_gs_compute_bound(struct radv_cmd_buffer *cmd_buffer)
+ {
+    const struct radv_graphics_pipeline *pipeline = cmd_buffer->state.graphics_pipeline;
+-   return pipeline ? pipeline->base.gs_compute : NULL;
++   return pipeline ? pipeline->base.gs_compute : radv_gs_compute_objects(cmd_buffer);
+ }
+ 
+ /* A draw whose counts the CPU knows. Returns false when the bound pipeline
+diff --git a/src/amd/vulkan/radv_cmd_buffer.h b/src/amd/vulkan/radv_cmd_buffer.h
+index 8ab75d1eaf6..e56161a07d8 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.h
++++ b/src/amd/vulkan/radv_cmd_buffer.h
+@@ -19,6 +19,7 @@
+ #include "radv_device.h"
+ #include "radv_image_view.h"
+ #include "radv_physical_device.h"
++#include "radv_gs_compute.h"
+ #include "radv_pipeline_graphics.h"
+ #include "radv_video.h"
+ 
+@@ -364,6 +365,10 @@ struct radv_cmd_state {
+    /* Whether the draw is a geometry shader's rasterization copy (its compute
+     * passes counted for the queries). */
+    bool gs_compute_rasterizing;
++   /* The geometry-shader-as-compute set the bound shader objects make
++    * (radv_gs_compute_objects): the geometry object's passes, the vertex
++    * object's vertex pass. */
++   struct radv_gs_compute_pipeline gs_compute_objects;
+ 
+    VkShaderStageFlags active_stages;
+    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
+diff --git a/src/amd/vulkan/radv_gs_compute.c b/src/amd/vulkan/radv_gs_compute.c
+index c8614be6f95..aa30dab26ab 100644
+--- a/src/amd/vulkan/radv_gs_compute.c
++++ b/src/amd/vulkan/radv_gs_compute.c
+@@ -10,7 +10,10 @@
+ 
+ #include "nir/radv_nir.h"
+ #include "nir_builder.h"
++#include "nir_serialize.h"
+ #include "radv_pipeline.h"
++#include "radv_pipeline_cache.h"
++#include "radv_device.h"
+ #include "radv_shader.h"
+ #include "radv_shader_args.h"
+ #include "radv_shader_info.h"
+@@ -34,9 +37,9 @@ radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info, const str
+    if (!compiler_info->key.no_legacy_gs || !gs || !stages[MESA_SHADER_VERTEX].nir)
+       return false;
+ 
+-   /* So far: a vertex shader feeding the geometry shader, with its vertex input
+-    * known when the pipeline is compiled. */
+-   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir || gfx_state->vs.has_prolog)
++   /* So far: a vertex shader feeding the geometry shader. Its vertex input may
++    * come at the draw (radv_gs_compute_deferred_vs). */
++   if (stages[MESA_SHADER_TESS_CTRL].nir || stages[MESA_SHADER_TESS_EVAL].nir)
+       return false;
+ 
+    /* Transform feedback from a geometry shader, which NGG cannot capture here
+@@ -128,36 +131,35 @@ strip_side_effects(nir_shader *nir)
+    } while (progress);
+ }
+ 
+-void
+-radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
+-                      struct radv_gs_compute_nir *out)
++/* The vertex shader's half: its outputs go to memory, where the geometry
++ * shader reads them; returns the mask that fixes their layout. */
++uint64_t
++radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key)
+ {
+-   struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
+-   struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
+-   nir_shader *vs = vs_stage->nir;
+-   nir_shader *gs = gs_stage->nir;
++   radv_nir_lower_io(vs);
++   NIR_PASS(_, vs, nir_lower_vars_to_ssa);
++   radv_optimize_nir(vs, key->optimisations_disabled);
++   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+ 
+-   memset(out, 0, sizeof(*out));
++   uint64_t outputs = vs->info.outputs_written;
++   NIR_PASS(_, vs, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow, &outputs);
++   return outputs;
++}
+ 
+-   radv_nir_lower_io(vs);
++/* The geometry shader's half: poly's count pass, pre-GS setup, the GS proper
++ * (out->nir) and the rasterization copy (returned). The GS reads the vertex
++ * outputs through the mask the draw passes (poly's vertex parameters), so this
++ * half does not depend on the vertex shader. */
++nir_shader *
++radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key, struct radv_gs_compute_nir *out)
++{
+    radv_nir_lower_io(gs);
+-   NIR_PASS(_, vs, nir_lower_vars_to_ssa);
+    NIR_PASS(_, gs, nir_lower_vars_to_ssa);
+-   radv_optimize_nir(vs, vs_stage->key.optimisations_disabled);
+-   radv_optimize_nir(gs, gs_stage->key.optimisations_disabled);
++   radv_optimize_nir(gs, key->optimisations_disabled);
+    /* poly keeps the memory writes in a count pass only when the shader's
+     * information says it writes memory: gather it again after lowering. */
+-   nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
+ 
+-   /* The vertex shader: its outputs to memory, where the geometry shader reads
+-    * them. The mask fixes the layout both sides use. */
+-   out->vs_outputs = vs->info.outputs_written;
+-   NIR_PASS(_, vs, nir_shader_intrinsics_pass, lower_vs_output_to_memory, nir_metadata_control_flow,
+-            &out->vs_outputs);
+-
+-   /* The geometry shader: poly's count pass, pre-GS setup, the GS proper and
+-    * the rasterization copy. */
+    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
+    NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs, &out->info);
+ 
+@@ -188,10 +190,24 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
+     * SPIR-V: poly made it after that. */
+    NIR_PASS(_, rast, nir_lower_system_values);
+ 
+-   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs;
+    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_COUNT)] = count;
+    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_PRE_GS)] = pre_gs;
+    out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_MAIN)] = gs;
++   return rast;
++}
++
++void
++radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
++                      struct radv_gs_compute_nir *out)
++{
++   (void)compiler_info;
++   struct radv_shader_stage *vs_stage = &stages[MESA_SHADER_VERTEX];
++   struct radv_shader_stage *gs_stage = &stages[MESA_SHADER_GEOMETRY];
++
++   memset(out, 0, sizeof(*out));
++   out->vs_outputs = radv_gs_compute_lower_vs(vs_stage->nir, &vs_stage->key);
++   out->nir[radv_gs_compute_index(RADV_GS_COMPUTE_VS)] = vs_stage->nir;
++   nir_shader *const rast = radv_gs_compute_split_gs(gs_stage->nir, &gs_stage->key, out);
+ 
+    /* The pipeline's hardware vertex shader is the rasterization copy; there is
+     * no hardware geometry shader. */
+@@ -447,6 +463,96 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
+    return binary;
+ }
+ 
++struct radv_gs_compute_deferred_vs *
++radv_gs_compute_deferred_vs_create(struct radv_device *device, const struct radv_gs_compute_binaries *binaries,
++                                   const struct radv_pipeline_layout *layout,
++                                   const struct radv_graphics_state_key *gfx_state)
++{
++   struct radv_gs_compute_deferred_vs *deferred = calloc(1, sizeof(*deferred));
++   if (!deferred)
++      return NULL;
++   deferred->nir = malloc(binaries->vs_nir_size);
++   if (!deferred->nir) {
++      free(deferred);
++      return NULL;
++   }
++   memcpy(deferred->nir, binaries->vs_nir, binaries->vs_nir_size);
++   deferred->nir_size = binaries->vs_nir_size;
++   deferred->key = binaries->vs_key;
++   deferred->gfx_state = *gfx_state;
++   radv_pipeline_layout_init(device, &deferred->layout, layout->independent_sets);
++   for (uint32_t s = 0; s < layout->num_sets; s++) {
++      if (layout->set[s].layout)
++         radv_pipeline_layout_add_set(&deferred->layout, s, layout->set[s].layout);
++   }
++   simple_mtx_init(&deferred->lock, mtx_plain);
++   util_dynarray_init(&deferred->variants, NULL);
++   return deferred;
++}
++
++void
++radv_gs_compute_deferred_vs_destroy(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred)
++{
++   if (!deferred)
++      return;
++   util_dynarray_foreach (&deferred->variants, struct radv_gs_compute_vs_variant, variant)
++      radv_shader_unref(device, variant->shader);
++   util_dynarray_fini(&deferred->variants);
++   simple_mtx_destroy(&deferred->lock);
++   radv_pipeline_layout_finish(device, &deferred->layout);
++   free(deferred->nir);
++   free(deferred);
++}
++
++struct radv_shader *
++radv_gs_compute_deferred_vs_get(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred,
++                                const struct radv_graphics_state_key *vi_key)
++{
++   struct radv_shader *shader = NULL;
++
++   simple_mtx_lock(&deferred->lock);
++   util_dynarray_foreach (&deferred->variants, struct radv_gs_compute_vs_variant, variant) {
++      if (!memcmp(&variant->vi_key.vi, &vi_key->vi, sizeof(vi_key->vi))) {
++         shader = variant->shader;
++         break;
++      }
++   }
++
++   if (!shader) {
++      const struct radv_compiler_info *compiler_info = &device->compiler_info;
++      struct blob_reader reader;
++      blob_reader_init(&reader, deferred->nir, deferred->nir_size);
++      nir_shader *nir = nir_deserialize(NULL, &compiler_info->nir_options[MESA_SHADER_VERTEX], &reader);
++
++      struct radv_shader_stage stage;
++      memset(&stage, 0, sizeof(stage));
++      stage.stage = MESA_SHADER_VERTEX;
++      stage.next_stage = MESA_SHADER_GEOMETRY;
++      stage.entrypoint = "main";
++      stage.key = deferred->key;
++      radv_shader_layout_init(&deferred->layout, MESA_SHADER_VERTEX, &stage.layout);
++
++      struct radv_graphics_state_key gfx_state = deferred->gfx_state;
++      memcpy(&gfx_state.vi, &vi_key->vi, sizeof(gfx_state.vi));
++      gfx_state.vs.has_prolog = false;
++
++      struct radv_shader_debug_info debug = {0};
++      struct radv_shader_binary *binary =
++         radv_gs_compute_compile(compiler_info, &gfx_state, &stage, RADV_GS_COMPUTE_VS, nir, &debug);
++      ralloc_free(nir);
++      if (binary) {
++         shader = radv_shader_create(device, NULL, binary, true, &debug);
++         free(binary);
++      }
++      if (shader) {
++         const struct radv_gs_compute_vs_variant variant = {.vi_key = *vi_key, .shader = shader};
++         util_dynarray_append(&deferred->variants, variant);
++      }
++   }
++   simple_mtx_unlock(&deferred->lock);
++   return shader;
++}
++
+ VkResult
+ radv_gs_compute_get_meta_pipeline(struct radv_device *device, enum radv_gs_compute_meta meta,
+                                   VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
+diff --git a/src/amd/vulkan/radv_gs_compute.h b/src/amd/vulkan/radv_gs_compute.h
+index f397a73c946..2f737744c1e 100644
+--- a/src/amd/vulkan/radv_gs_compute.h
++++ b/src/amd/vulkan/radv_gs_compute.h
+@@ -12,7 +12,10 @@
+ #include <stdint.h>
+ 
+ #include "poly/nir/poly_nir.h"
++#include "util/simple_mtx.h"
++#include "util/u_dynarray.h"
+ #include "radv_gs_compute_abi.h"
++#include "radv_pipeline_layout.h"
+ #include "radv_shader.h"
+ #include "radv_shader_info.h"
+ #include "sid.h"
+@@ -65,18 +68,46 @@ struct radv_gs_compute_nir {
+    uint64_t vs_outputs;
+ };
+ 
+-/* What a pipeline compile hands back (radv_graphics_shaders_compile). */
++/* What a pipeline compile hands back (radv_graphics_shaders_compile). With
++ * the vertex input unknown when the pipeline is compiled (a dynamic vertex
++ * input, which a hardware vertex shader takes through a prolog), the vertex
++ * pass is not compiled: its lowered NIR comes back serialized instead, with
++ * the vertex stage's key, for radv_gs_compute_deferred_vs_create. */
+ struct radv_gs_compute_binaries {
+    bool used;
+    struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
+    struct radv_shader_debug_info debug[RADV_GS_COMPUTE_SHADERS];
+    struct poly_gs_info info;
+    uint64_t vs_outputs;
++   void *vs_nir;
++   size_t vs_nir_size;
++   struct radv_shader_stage_key vs_key;
+ };
+ 
+-/* What a pipeline keeps (radv_pipeline.gs_compute). */
++/* A vertex pass compiled at the draw, one variant per vertex input the draws
++ * bring: the serialized vertex pass, what compiles it (the vertex stage's key
++ * and layout, the pipeline's state key) and the variants built so far. */
++struct radv_gs_compute_deferred_vs {
++   void *nir;
++   size_t nir_size;
++   struct radv_shader_stage_key key;
++   struct radv_pipeline_layout layout;
++   struct radv_graphics_state_key gfx_state;
++   simple_mtx_t lock;
++   /* struct radv_gs_compute_vs_variant */
++   struct util_dynarray variants;
++};
++
++struct radv_gs_compute_vs_variant {
++   struct radv_graphics_state_key vi_key; /* only vi is compared */
++   struct radv_shader *shader;
++};
++
++/* What a pipeline keeps (radv_pipeline.gs_compute). shaders[VS] is NULL
++ * where deferred_vs builds the vertex pass at the draw. */
+ struct radv_gs_compute_pipeline {
+    struct radv_shader *shaders[RADV_GS_COMPUTE_SHADERS];
++   struct radv_gs_compute_deferred_vs *deferred_vs;
+    struct poly_gs_info info;
+    uint64_t vs_outputs;
+ };
+@@ -132,6 +163,12 @@ bool radv_gs_compute_wanted(const struct radv_compiler_info *compiler_info,
+ void radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
+                            struct radv_gs_compute_nir *out);
+ 
++/* The two halves radv_gs_compute_split joins, for shaders compiled apart
++ * (shader objects). */
++uint64_t radv_gs_compute_lower_vs(nir_shader *vs, const struct radv_shader_stage_key *key);
++nir_shader *radv_gs_compute_split_gs(nir_shader *gs, const struct radv_shader_stage_key *key,
++                                     struct radv_gs_compute_nir *out);
++
+ /* Replaces the system values a geometry shader run as compute reads (poly's,
+  * the draw's) with loads from the draw block; the stage's arguments must be
+  * declared. */
+@@ -144,6 +181,18 @@ struct radv_shader_binary *radv_gs_compute_compile(const struct radv_compiler_in
+                                                    enum radv_gs_compute_kind kind, nir_shader *nir,
+                                                    struct radv_shader_debug_info *debug);
+ 
++struct radv_gs_compute_deferred_vs *
++radv_gs_compute_deferred_vs_create(struct radv_device *device, const struct radv_gs_compute_binaries *binaries,
++                                   const struct radv_pipeline_layout *layout,
++                                   const struct radv_graphics_state_key *gfx_state);
++void radv_gs_compute_deferred_vs_destroy(struct radv_device *device, struct radv_gs_compute_deferred_vs *deferred);
++
++/* The vertex pass for the vertex input in vi_key (its vi field), compiled on
++ * first use; NULL if it cannot be. */
++struct radv_shader *radv_gs_compute_deferred_vs_get(struct radv_device *device,
++                                                    struct radv_gs_compute_deferred_vs *deferred,
++                                                    const struct radv_graphics_state_key *vi_key);
++
+ /* The meta compute passes of a draw (cl/radv_gs_compute.cl): setting up one
+  * whose counts live in memory, unrolling its primitive restarts, and the
+  * prefix sum of its counts for transform feedback. Each one's push constant
+diff --git a/src/amd/vulkan/radv_pipeline_graphics.c b/src/amd/vulkan/radv_pipeline_graphics.c
+index 9e4f7882d37..1f09790961f 100644
+--- a/src/amd/vulkan/radv_pipeline_graphics.c
++++ b/src/amd/vulkan/radv_pipeline_graphics.c
+@@ -2758,7 +2758,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+ 
+    radv_fill_shader_info(compiler_info, RADV_PIPELINE_GRAPHICS, gfx_state, stages, active_nir_stages);
+ 
+-   if (gs_compute_used)
++   const bool gs_compute_rast = gs_compute_used || stages[MESA_SHADER_VERTEX].gs_compute_rast;
++   if (gs_compute_rast)
+       stages[MESA_SHADER_VERTEX].info.gs_compute = RADV_GS_COMPUTE_RAST;
+ 
+    /* Remove the primitive shading rate output if VRS flat shading overrides it. */
+@@ -2788,7 +2789,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+ 
+    radv_declare_pipeline_args(compiler_info, stages, gfx_state, active_nir_stages, debug);
+ 
+-   if (gs_compute_used)
++   if (gs_compute_rast)
+       radv_gs_compute_lower_sysvals(stages[MESA_SHADER_VERTEX].nir, compiler_info, &stages[MESA_SHADER_VERTEX]);
+ 
+    radv_foreach_stage (i, active_nir_stages) {
+@@ -2825,6 +2826,16 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
+          const enum radv_gs_compute_kind kind = RADV_GS_COMPUTE_VS + i;
+          const struct radv_shader_stage *api_stage =
+             &stages[kind == RADV_GS_COMPUTE_VS ? MESA_SHADER_VERTEX : MESA_SHADER_GEOMETRY];
++         /* With a dynamic vertex input, the vertex pass waits for the draw's. */
++         if (kind == RADV_GS_COMPUTE_VS && api_gfx_state->vs.has_prolog) {
++            struct blob blob;
++            blob_init(&blob);
++            nir_serialize(&blob, gs_compute_nir.nir[i], false);
++            blob_finish_get_buffer(&blob, &gs_compute->vs_nir, &gs_compute->vs_nir_size);
++            gs_compute->vs_key = api_stage->key;
++            ralloc_free(gs_compute_nir.nir[i]);
++            continue;
++         }
+          gs_compute->binaries[i] = radv_gs_compute_compile(compiler_info, api_gfx_state, api_stage, kind,
+                                                            gs_compute_nir.nir[i], &gs_compute->debug[i]);
+          ralloc_free(gs_compute_nir.nir[i]);
+@@ -3107,7 +3118,14 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
+       if (pipeline->base.gs_compute) {
+          pipeline->base.gs_compute->info = gs_compute.info;
+          pipeline->base.gs_compute->vs_outputs = gs_compute.vs_outputs;
++         if (gs_compute.vs_nir) {
++            pipeline->base.gs_compute->deferred_vs = radv_gs_compute_deferred_vs_create(
++               device, &gs_compute, &gfx_state->layout, &gfx_state->key.gfx_state);
++            if (!pipeline->base.gs_compute->deferred_vs)
++               result = VK_ERROR_OUT_OF_HOST_MEMORY;
++         }
+       }
++      free(gs_compute.vs_nir);
+    }
+ 
+    if (!skip_shaders_cache) {
+@@ -3435,6 +3453,7 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
+          if (pipeline->base.gs_compute->shaders[i])
+             radv_shader_unref(device, pipeline->base.gs_compute->shaders[i]);
+       }
++      radv_gs_compute_deferred_vs_destroy(device, pipeline->base.gs_compute->deferred_vs);
+       free(pipeline->base.gs_compute);
+    }
+ }
+diff --git a/src/amd/vulkan/radv_shader.h b/src/amd/vulkan/radv_shader.h
+index d14e6cd4b29..8851a9ca046 100644
+--- a/src/amd/vulkan/radv_shader.h
++++ b/src/amd/vulkan/radv_shader.h
+@@ -293,6 +293,10 @@ struct radv_shader_stage {
+ 
+    nir_shader *nir;
+    nir_shader *gs_copy_shader;
++
++   /* A vertex stage that is poly's rasterization copy of a geometry shader run
++    * as compute, compiled on its own (a geometry shader object's). */
++   bool gs_compute_rast;
+    nir_shader *internal_nir; /* meta shaders */
+ 
+    struct radv_shader_info info;
+diff --git a/src/amd/vulkan/radv_shader_object.c b/src/amd/vulkan/radv_shader_object.c
+index 0918f05728a..88afcb346f8 100644
+--- a/src/amd/vulkan/radv_shader_object.c
++++ b/src/amd/vulkan/radv_shader_object.c
+@@ -7,6 +7,8 @@
+ #include "vk_log.h"
+ 
+ #include "util/blob.h"
++#include "util/u_debug.h"
++#include "nir_serialize.h"
+ #include "radv_device.h"
+ #include "radv_entrypoints.h"
+ #include "radv_physical_device.h"
+@@ -42,6 +44,19 @@ radv_shader_object_destroy(struct radv_device *device, struct radv_shader_object
+                                       shader_obj->gs.copy_binary);
+    radv_shader_object_destroy_variant(device, shader_obj->code_type, shader_obj->shader, shader_obj->binary);
+ 
++   radv_gs_compute_deferred_vs_destroy(device, shader_obj->gs_compute.vs);
++   if (shader_obj->gs_compute.gs) {
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++         if (shader_obj->gs_compute.gs->shaders[i])
++            radv_shader_unref(device, shader_obj->gs_compute.gs->shaders[i]);
++         free(shader_obj->gs_compute.binaries[i]);
++      }
++      free(shader_obj->gs_compute.gs);
++   }
++   if (shader_obj->gs_compute.rast)
++      radv_shader_unref(device, shader_obj->gs_compute.rast);
++   free(shader_obj->gs_compute.rast_binary);
++
+    vk_object_base_finish(&shader_obj->base);
+    vk_free2(&device->vk.alloc, pAllocator, shader_obj);
+ }
+@@ -161,6 +176,167 @@ radv_shader_stage_init(const VkShaderCreateInfoEXT *sinfo, struct radv_shader_st
+    }
+ }
+ 
++/* The state key every graphics shader object is compiled with. */
++static void
++radv_shader_object_gfx_state(struct radv_graphics_state_key *gfx_state)
++{
++   memset(gfx_state, 0, sizeof(*gfx_state));
++   gfx_state->vs.has_prolog = true;
++   gfx_state->ps.has_epilog = true;
++   gfx_state->dynamic_rasterization_samples = true;
++   gfx_state->dynamic_provoking_vtx_mode = true;
++   gfx_state->dynamic_line_rast_mode = true;
++   gfx_state->rs.polygon_mode_unknown = true;
++   gfx_state->ps.exports_mrtz_via_epilog = true;
++
++   for (uint32_t i = 0; i < MAX_RTS; i++)
++      gfx_state->ps.epilog.color_map[i] = i;
++}
++
++static VkResult
++radv_shader_object_defer_vs(struct radv_shader_object *shader_obj, struct radv_device *device,
++                            const struct radv_shader_layout *shader_layout, const struct radv_shader_stage_key *key,
++                            const void *nir, size_t nir_size)
++{
++   struct radv_graphics_state_key gfx_state;
++   radv_shader_object_gfx_state(&gfx_state);
++
++   struct radv_pipeline_layout layout;
++   radv_pipeline_layout_init(device, &layout, shader_layout->independent_sets);
++   for (uint32_t i = 0; i < shader_layout->num_sets; i++) {
++      if (shader_layout->set[i].layout)
++         radv_pipeline_layout_add_set(&layout, i, shader_layout->set[i].layout);
++   }
++
++   const struct radv_gs_compute_binaries binaries = {
++      .vs_nir = (void *)nir,
++      .vs_nir_size = nir_size,
++      .vs_key = *key,
++   };
++   shader_obj->gs_compute.vs = radv_gs_compute_deferred_vs_create(device, &binaries, &layout, &gfx_state);
++   radv_pipeline_layout_finish(device, &layout);
++   return shader_obj->gs_compute.vs ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++/* A geometry object's passes and rasterization copy, from its NIR (consumed). */
++static VkResult
++radv_shader_object_split_gs(struct radv_shader_object *shader_obj, struct radv_device *device,
++                            const struct radv_shader_stage *gs_stage, nir_shader *nir)
++{
++   const struct radv_compiler_info *compiler_info = &device->compiler_info;
++   struct radv_gs_compute_nir out = {0};
++   nir_shader *rast = radv_gs_compute_split_gs(nir, &gs_stage->key, &out);
++
++   struct radv_graphics_state_key gfx_state;
++   radv_shader_object_gfx_state(&gfx_state);
++   gfx_state.vs.has_prolog = false;
++   gfx_state.ia.topology = radv_gs_compute_rast_topology(out.info.mode);
++
++   struct radv_gs_compute_pipeline *gsc = calloc(1, sizeof(*gsc));
++   if (!gsc) {
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++)
++         ralloc_free(out.nir[i]);
++      ralloc_free(rast);
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
++   gsc->info = out.info;
++   shader_obj->gs_compute.gs = gsc;
++
++   for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++      if (!out.nir[i])
++         continue;
++      struct radv_shader_debug_info debug = {0};
++      shader_obj->gs_compute.binaries[i] =
++         radv_gs_compute_compile(compiler_info, &gfx_state, gs_stage, RADV_GS_COMPUTE_VS + i, out.nir[i], &debug);
++      ralloc_free(out.nir[i]);
++      if (shader_obj->gs_compute.binaries[i])
++         gsc->shaders[i] = radv_shader_create(device, NULL, shader_obj->gs_compute.binaries[i], true, &debug);
++      if (!gsc->shaders[i]) {
++         ralloc_free(rast);
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      }
++   }
++
++   /* The rasterization copy is the vertex stage of the draws that bind this
++    * object, with the fragment stage after it. */
++   struct radv_shader_stage stages[MESA_VULKAN_SHADER_STAGES];
++   for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
++      memset(&stages[i], 0, sizeof(stages[i]));
++      stages[i].stage = MESA_SHADER_NONE;
++      stages[i].next_stage = MESA_SHADER_NONE;
++   }
++   struct radv_shader_stage *vs = &stages[MESA_SHADER_VERTEX];
++   vs->stage = MESA_SHADER_VERTEX;
++   vs->next_stage = MESA_SHADER_FRAGMENT;
++   vs->entrypoint = "main";
++   vs->key = gs_stage->key;
++   vs->layout = gs_stage->layout;
++   vs->nir = rast;
++   vs->gs_compute_rast = true;
++   vs->feedback.flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
++
++   struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES] = {NULL};
++   struct radv_shader_binary *binaries[MESA_VULKAN_SHADER_STAGES] = {NULL};
++   struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
++   struct radv_shader_debug_info gs_copy_debug = {0};
++   struct radv_shader_binary *gs_copy_binary = NULL;
++   struct radv_shader *gs_copy_shader = NULL;
++   radv_graphics_shaders_compile(compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug, binaries,
++                                 &gs_copy_debug, &gs_copy_binary, NULL);
++   radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &gs_copy_shader, gs_copy_binary,
++                                &gs_copy_debug);
++   ralloc_free(stages[MESA_SHADER_VERTEX].nir);
++   free(gs_copy_binary);
++
++   shader_obj->gs_compute.rast = shaders[MESA_SHADER_VERTEX];
++   shader_obj->gs_compute.rast_binary = binaries[MESA_SHADER_VERTEX];
++   return shader_obj->gs_compute.rast ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++/* What a vertex or geometry object needs for geometry shaders run as compute,
++ * from its SPIR-V. */
++static VkResult
++radv_shader_object_init_gs_compute(struct radv_shader_object *shader_obj, struct radv_device *device,
++                                   const VkShaderCreateInfoEXT *pCreateInfo)
++{
++   const struct radv_compiler_info *compiler_info = &device->compiler_info;
++   const mesa_shader_stage stage = shader_obj->stage;
++
++   if (!compiler_info->key.no_legacy_gs)
++      return VK_SUCCESS;
++   if (!(stage == MESA_SHADER_VERTEX && (pCreateInfo->nextStage & VK_SHADER_STAGE_GEOMETRY_BIT)) &&
++       stage != MESA_SHADER_GEOMETRY)
++      return VK_SUCCESS;
++
++   struct radv_shader_stage s;
++   radv_shader_stage_init(pCreateInfo, &s);
++   const struct radv_spirv_to_nir_options options = {.lower_view_index_to_zero = true};
++   nir_shader *nir = radv_shader_spirv_to_nir(compiler_info, &s, &options, false);
++   if (!nir)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   if (stage == MESA_SHADER_GEOMETRY) {
++      /* As radv_gs_compute_wanted decides for pipelines. */
++      if (!nir->xfb_info && !debug_get_bool_option("RADV_PS5_GS_COMPUTE", false)) {
++         ralloc_free(nir);
++         return VK_SUCCESS;
++      }
++      return radv_shader_object_split_gs(shader_obj, device, &s, nir);
++   }
++
++   shader_obj->gs_compute.vs_outputs = radv_gs_compute_lower_vs(nir, &s.key);
++   struct blob blob;
++   blob_init(&blob);
++   nir_serialize(&blob, nir, false);
++   ralloc_free(nir);
++   void *data;
++   size_t size;
++   blob_finish_get_buffer(&blob, &data, &size);
++   const VkResult result = radv_shader_object_defer_vs(shader_obj, device, &s.layout, &s.key, data, size);
++   free(data);
++   return result;
++}
++
+ static VkResult
+ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct radv_device *device,
+                                  const VkShaderCreateInfoEXT *pCreateInfo)
+@@ -171,6 +347,7 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
+    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+       stages[i].stage = MESA_SHADER_NONE;
+       stages[i].gs_copy_shader = NULL;
++      stages[i].gs_compute_rast = false;
+       stages[i].nir = NULL;
+       stages[i].spirv.size = 0;
+       stages[i].next_stage = MESA_SHADER_NONE;
+@@ -178,18 +355,8 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
+ 
+    radv_shader_stage_init(pCreateInfo, &stages[stage]);
+ 
+-   struct radv_graphics_state_key gfx_state = {0};
+-
+-   gfx_state.vs.has_prolog = true;
+-   gfx_state.ps.has_epilog = true;
+-   gfx_state.dynamic_rasterization_samples = true;
+-   gfx_state.dynamic_provoking_vtx_mode = true;
+-   gfx_state.dynamic_line_rast_mode = true;
+-   gfx_state.rs.polygon_mode_unknown = true;
+-   gfx_state.ps.exports_mrtz_via_epilog = true;
+-
+-   for (uint32_t i = 0; i < MAX_RTS; i++)
+-      gfx_state.ps.epilog.color_map[i] = i;
++   struct radv_graphics_state_key gfx_state;
++   radv_shader_object_gfx_state(&gfx_state);
+ 
+    struct radv_shader *shader = NULL;
+    struct radv_shader_binary *binary = NULL;
+@@ -311,6 +478,68 @@ radv_shader_object_init_binary(struct radv_device *device, struct blob_reader *b
+    return VK_SUCCESS;
+ }
+ 
++/* A binary's geometry-shader-as-compute part (radv_GetShaderBinaryDataEXT).
++ * The binaries are copied: the object outlives the data it was made from. */
++static VkResult
++radv_shader_object_read_gs_binary(struct radv_device *device, struct blob_reader *blob, struct radv_shader **shader,
++                                  struct radv_shader_binary **binary)
++{
++   *shader = NULL;
++   *binary = NULL;
++   if (!blob_read_uint32(blob))
++      return VK_SUCCESS;
++   struct radv_shader_binary *data;
++   const VkResult result = radv_shader_object_init_binary(device, blob, shader, &data);
++   if (result != VK_SUCCESS)
++      return result;
++   *binary = malloc(data->total_size);
++   if (!*binary)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   memcpy(*binary, data, data->total_size);
++   return *shader ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static VkResult
++radv_shader_object_read_gs_compute(struct radv_shader_object *shader_obj, struct radv_device *device,
++                                   const VkShaderCreateInfoEXT *pCreateInfo, struct blob_reader *blob)
++{
++   const uint32_t kind = blob_read_uint32(blob);
++   if (blob->overrun)
++      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
++
++   if (kind == 1) {
++      shader_obj->gs_compute.vs_outputs = blob_read_uint32(blob);
++      shader_obj->gs_compute.vs_outputs |= (uint64_t)blob_read_uint32(blob) << 32;
++      struct radv_shader_stage_key key;
++      blob_copy_bytes(blob, &key, sizeof(key));
++      const uint32_t nir_size = blob_read_uint32(blob);
++      const void *nir = blob_read_bytes(blob, align(nir_size, 4));
++      if (blob->overrun)
++         return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
++      struct radv_shader_layout layout = {0};
++      radv_get_shader_layout(pCreateInfo, &layout);
++      return radv_shader_object_defer_vs(shader_obj, device, &layout, &key, nir, nir_size);
++   }
++
++   if (kind == 2) {
++      struct radv_gs_compute_pipeline *gsc = calloc(1, sizeof(*gsc));
++      if (!gsc)
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      shader_obj->gs_compute.gs = gsc;
++      blob_copy_bytes(blob, &gsc->info, sizeof(gsc->info));
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++) {
++         const VkResult result =
++            radv_shader_object_read_gs_binary(device, blob, &gsc->shaders[i], &shader_obj->gs_compute.binaries[i]);
++         if (result != VK_SUCCESS)
++            return result;
++      }
++      return radv_shader_object_read_gs_binary(device, blob, &shader_obj->gs_compute.rast,
++                                               &shader_obj->gs_compute.rast_binary);
++   }
++
++   return kind ? VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT : VK_SUCCESS;
++}
++
+ static VkResult
+ radv_shader_object_init(struct radv_shader_object *shader_obj, struct radv_device *device,
+                         const VkShaderCreateInfoEXT *pCreateInfo)
+@@ -380,6 +609,10 @@ radv_shader_object_init(struct radv_shader_object *shader_obj, struct radv_devic
+                return result;
+          }
+       }
++
++      result = radv_shader_object_read_gs_compute(shader_obj, device, pCreateInfo, &blob);
++      if (result != VK_SUCCESS)
++         return result;
+    } else {
+       struct radv_shader_layout layout = {0};
+ 
+@@ -393,6 +626,8 @@ radv_shader_object_init(struct radv_shader_object *shader_obj, struct radv_devic
+          result = radv_shader_object_init_compute(shader_obj, device, pCreateInfo);
+       } else {
+          result = radv_shader_object_init_graphics(shader_obj, device, pCreateInfo);
++         if (result == VK_SUCCESS)
++            result = radv_shader_object_init_gs_compute(shader_obj, device, pCreateInfo);
+       }
+ 
+       if (result != VK_SUCCESS)
+@@ -437,23 +672,14 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
+    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+       stages[i].stage = MESA_SHADER_NONE;
+       stages[i].gs_copy_shader = NULL;
++      stages[i].gs_compute_rast = false;
+       stages[i].nir = NULL;
+       stages[i].spirv.size = 0;
+       stages[i].next_stage = MESA_SHADER_NONE;
+    }
+ 
+-   struct radv_graphics_state_key gfx_state = {0};
+-
+-   gfx_state.vs.has_prolog = true;
+-   gfx_state.ps.has_epilog = true;
+-   gfx_state.dynamic_rasterization_samples = true;
+-   gfx_state.dynamic_provoking_vtx_mode = true;
+-   gfx_state.dynamic_line_rast_mode = true;
+-   gfx_state.rs.polygon_mode_unknown = true;
+-   gfx_state.ps.exports_mrtz_via_epilog = true;
+-
+-   for (uint32_t i = 0; i < MAX_RTS; i++)
+-      gfx_state.ps.epilog.color_map[i] = i;
++   struct radv_graphics_state_key gfx_state;
++   radv_shader_object_gfx_state(&gfx_state);
+ 
+    for (unsigned i = 0; i < createInfoCount; i++) {
+       const VkShaderCreateInfoEXT *pCreateInfo = &pCreateInfos[i];
+@@ -578,6 +804,10 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
+       ralloc_free(stages[s].nir);
+ 
+       pShaders[i] = radv_shader_object_to_handle(shader_obj);
++
++      const VkResult result = radv_shader_object_init_gs_compute(shader_obj, device, pCreateInfo);
++      if (result != VK_SUCCESS)
++         return vk_error(device, result);
+    }
+ 
+    ralloc_free(stages[MESA_SHADER_GEOMETRY].gs_copy_shader);
+@@ -697,6 +927,24 @@ radv_get_shader_binary_size(const struct radv_shader_binary *binary)
+    return size;
+ }
+ 
++/* Geometry shaders run as compute: a vertex object's serialized vertex pass,
++ * or a geometry object's passes and rasterization copy. */
++static size_t
++radv_get_gs_compute_size(const struct radv_shader_object *shader_obj)
++{
++   size_t size = sizeof(uint32_t);
++   if (shader_obj->gs_compute.vs) {
++      size += 2 * sizeof(uint32_t) + sizeof(struct radv_shader_stage_key) + sizeof(uint32_t) +
++              align(shader_obj->gs_compute.vs->nir_size, 4);
++   } else if (shader_obj->gs_compute.gs) {
++      size += sizeof(struct poly_gs_info);
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++)
++         size += radv_get_shader_binary_size(shader_obj->gs_compute.binaries[i]);
++      size += radv_get_shader_binary_size(shader_obj->gs_compute.rast_binary);
++   }
++   return size;
++}
++
+ static size_t
+ radv_get_shader_object_size(const struct radv_shader_object *shader_obj)
+ {
+@@ -714,6 +962,8 @@ radv_get_shader_object_size(const struct radv_shader_object *shader_obj)
+       size += radv_get_shader_binary_size(shader_obj->gs.copy_binary);
+    }
+ 
++   size += radv_get_gs_compute_size(shader_obj);
++
+    return size;
+ }
+ 
+@@ -777,6 +1027,25 @@ radv_GetShaderBinaryDataEXT(VkDevice _device, VkShaderEXT shader, size_t *pDataS
+       radv_write_shader_binary(&blob, shader_obj->gs.copy_binary);
+    }
+ 
++   if (shader_obj->gs_compute.vs) {
++      const struct radv_gs_compute_deferred_vs *vs = shader_obj->gs_compute.vs;
++      blob_write_uint32(&blob, 1);
++      blob_write_uint32(&blob, (uint32_t)shader_obj->gs_compute.vs_outputs);
++      blob_write_uint32(&blob, (uint32_t)(shader_obj->gs_compute.vs_outputs >> 32));
++      blob_write_bytes(&blob, &vs->key, sizeof(vs->key));
++      blob_write_uint32(&blob, vs->nir_size);
++      blob_write_bytes(&blob, vs->nir, vs->nir_size);
++      blob_write_bytes(&blob, "\0\0\0", align(vs->nir_size, 4) - vs->nir_size);
++   } else if (shader_obj->gs_compute.gs) {
++      blob_write_uint32(&blob, 2);
++      blob_write_bytes(&blob, &shader_obj->gs_compute.gs->info, sizeof(shader_obj->gs_compute.gs->info));
++      for (unsigned i = 0; i < RADV_GS_COMPUTE_SHADERS; i++)
++         radv_write_shader_binary(&blob, shader_obj->gs_compute.binaries[i]);
++      radv_write_shader_binary(&blob, shader_obj->gs_compute.rast_binary);
++   } else {
++      blob_write_uint32(&blob, 0);
++   }
++
+    assert(!blob.out_of_memory);
+ 
+    return VK_SUCCESS;
+diff --git a/src/amd/vulkan/radv_shader_object.h b/src/amd/vulkan/radv_shader_object.h
+index a1713cf5bb3..6b5709c636d 100644
+--- a/src/amd/vulkan/radv_shader_object.h
++++ b/src/amd/vulkan/radv_shader_object.h
+@@ -11,6 +11,7 @@
+ #ifndef RADV_SHADER_OBJECT_H
+ #define RADV_SHADER_OBJECT_H
+ 
++#include "radv_gs_compute.h"
+ #include "radv_shader.h"
+ 
+ struct radv_shader_object {
+@@ -44,6 +45,21 @@ struct radv_shader_object {
+    } gs;
+ 
+    uint32_t dynamic_offset_count;
++
++   /* Geometry shaders run as compute (radv_gs_compute.h) where the GPU has no
++    * legacy GS. A vertex object that may feed a geometry shader keeps its
++    * vertex pass, compiled at the draw for the vertex input, and the mask of
++    * the outputs it stores; a geometry object whose shader NGG cannot run
++    * here (transform feedback) keeps its passes and its rasterization copy,
++    * which a draw binds as the vertex stage. */
++   struct {
++      struct radv_gs_compute_deferred_vs *vs;
++      uint64_t vs_outputs;
++      struct radv_gs_compute_pipeline *gs;
++      struct radv_shader_binary *binaries[RADV_GS_COMPUTE_SHADERS];
++      struct radv_shader *rast;
++      struct radv_shader_binary *rast_binary;
++   } gs_compute;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(radv_shader_object, base, VkShaderEXT, VK_OBJECT_TYPE_SHADER_EXT);

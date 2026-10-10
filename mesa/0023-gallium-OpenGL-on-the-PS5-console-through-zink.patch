@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:23:23 +0000
+Subject: [PATCH] gallium: OpenGL on the PS5 console through zink
+
+zink on RADV, without DRM: DRI on the 'pseudo-drm' platform, as for zink on
+kgsl. On the console zink calls RADV through the vkGetInstanceProcAddr and
+vkGetDeviceProcAddr of libvulkan.so.1, which libgallium links as it would
+link a loader.
+
+A library on the PS5 cannot import another library's thread-local variable:
+an earlier build's first GL call from libGLESv2 ended in
+PRX_NOT_RESOLVED_FUNCTION. So there, GET_DISPATCH and GET_CURRENT_CONTEXT
+call shared-glapi's functions, as on Windows, and libgallium exports those
+instead of the thread-local variables; and __THREAD_INITIAL_EXEC is __thread,
+as on Apple (an extern C++ thread_local is reached through a weak
+initialization function, _ZTH..., which is not resolved across libraries).
+
+egl.pc and glesv2.pc name the system modules RADV calls, as vulkan.pc does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ meson.build                            |  7 +++++--
+ src/egl/meson.build                    |  2 +-
+ src/gallium/drivers/zink/meson.build   |  5 +++++
+ src/gallium/drivers/zink/zink_screen.c | 12 ++++++++++++
+ src/gallium/meson.build                |  9 +++++++++
+ src/gallium/targets/dri/dri.sym.in     |  3 +--
+ src/mesa/glapi/es2api/meson.build      |  2 +-
+ src/mesa/glapi/glapi/glapi.h           |  4 +++-
+ src/util/u_thread.h                    |  7 +++++--
+ 9 files changed, 42 insertions(+), 9 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 76638305233..855fc6c1cc6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -370,8 +370,11 @@ with_vdrm = [
+   with_intel_virtio,
+ ].contains(true)
+ 
++# The PS5 console: no DRM, zink on RADV, which is the console's libvulkan.
++with_ps5_zink = with_gallium_zink and get_option('vulkan-drivers').contains('amd') and get_option('radv-winsys') == 'ps5' and host_machine.system() != 'linux'
++
+ with_dri = false
+-if with_gallium and (system_has_kms_drm or (with_gallium_zink and (freedreno_kmds.contains('kgsl') or host_machine.system() == 'darwin')))
++if with_gallium and (system_has_kms_drm or (with_gallium_zink and (freedreno_kmds.contains('kgsl') or host_machine.system() == 'darwin')) or with_ps5_zink)
+   _glx = get_option('glx')
+   _egl = get_option('egl')
+   if _glx == 'dri' or _egl.enabled() or (_glx == 'disabled' and _egl.allowed())
+@@ -432,7 +435,7 @@ elif ['windows', 'cygwin'].contains(host_machine.system())
+   with_dri_platform = 'windows'
+ elif system_has_kms_drm
+   with_dri_platform = 'drm'
+-elif host_machine.system() == 'gnu' or (freedreno_kmds.contains('kgsl') and with_gallium_zink)
++elif host_machine.system() == 'gnu' or (freedreno_kmds.contains('kgsl') and with_gallium_zink) or with_ps5_zink
+   with_dri_platform = 'pseudo-drm'
+ else
+   # FIXME: haiku doesn't use dri, and xlib doesn't use dri, probably should
+diff --git a/src/egl/meson.build b/src/egl/meson.build
+index 4e62ee41e4e..1ca62f7e2cf 100644
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -245,7 +245,7 @@ else
+     name : 'egl',
+     description : 'Mesa EGL Library',
+     version : meson.project_version(),
+-    libraries : libegl,
++    libraries : [libegl, ps5_sysmodule_libs],
+     libraries_private: gl_priv_libs,
+     requires_private : gl_priv_reqs,
+     extra_cflags : gl_pkgconfig_c_flags,
+diff --git a/src/gallium/drivers/zink/meson.build b/src/gallium/drivers/zink/meson.build
+index 073f0a4b236..5c760bb1043 100644
+--- a/src/gallium/drivers/zink/meson.build
++++ b/src/gallium/drivers/zink/meson.build
+@@ -113,6 +113,11 @@ if not with_platform_windows
+   zink_deps += libzinkwinsys
+ endif
+ 
++# On the PS5 console zink links RADV, which is the console's libvulkan.
++if with_ps5_zink
++  zink_deps += libvulkan_radeon
++endif
++
+ driver_zink = declare_dependency(
+   compile_args : '-DGALLIUM_ZINK',
+   link_with : zink_deps,
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index c11c6a2cabe..ee5dd5a883d 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -78,6 +78,13 @@ bool zink_tracing = false;
+ #else
+ #define VK_LIBNAME "libvulkan.so.1"
+ #endif
++
++#if defined(__PROSPERO__)
++/* The PS5 has no Vulkan loader: RADV is the console's libvulkan and exports the
++ * Vulkan API itself, so zink links it as it would link a loader. */
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *pName);
++#endif
+ #endif
+ 
+ #ifdef __APPLE__
+@@ -3422,6 +3429,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+    u_trace_state_init();
+ 
++#if defined(__PROSPERO__)
++   screen->vk_GetInstanceProcAddr = vkGetInstanceProcAddr;
++   screen->vk_GetDeviceProcAddr = vkGetDeviceProcAddr;
++#else
+    screen->loader_lib = util_dl_open(VK_LIBNAME);
+    if (!screen->loader_lib) {
+       if (!screen->driver_name_is_inferred)
+@@ -3437,6 +3448,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          mesa_loge("ZINK: failed to get proc address");
+       goto fail;
+    }
++#endif
+ 
+    if (config) {
+       driParseConfigFiles(config->options, config->options_info,
+diff --git a/src/gallium/meson.build b/src/gallium/meson.build
+index 67011f56b9f..505e706a128 100644
+--- a/src/gallium/meson.build
++++ b/src/gallium/meson.build
+@@ -16,6 +16,15 @@ foreach d : [[with_gallium_r300 or with_gallium_radeonsi or with_gallium_r600, '
+   endif
+ endforeach
+ 
++# shared-glapi's dispatch and context for libGLESv2 and libEGL: the
++# thread-local variables, or on the PS5 (where a library cannot import another's
++# thread-local variable, glapi.h) the functions that read them
++if with_ps5_zink
++  sym_config.set('glapi_tls', '_mesa_glapi_get_context;\n\t\t_mesa_glapi_get_dispatch;')
++else
++  sym_config.set('glapi_tls', '_mesa_glapi_tls_Context;\n\t\t_mesa_glapi_tls_Dispatch;')
++endif
++
+ if with_gallium_va
+   sym_config.set('va_driver_init', '__vaDriverInit_*_*;')
+ else
+diff --git a/src/gallium/targets/dri/dri.sym.in b/src/gallium/targets/dri/dri.sym.in
+index d987668e4f5..1e85fd9b353 100644
+--- a/src/gallium/targets/dri/dri.sym.in
++++ b/src/gallium/targets/dri/dri.sym.in
+@@ -6,8 +6,7 @@
+                 _mesa_glapi_get_proc_offset;
+                 _mesa_glapi_set_context;
+                 _mesa_glapi_set_dispatch;
+-                _mesa_glapi_tls_Context;
+-                _mesa_glapi_tls_Dispatch;
++                @glapi_tls@
+ 
+ 		ddebug_screen_create;
+ 		noop_screen_create;
+diff --git a/src/mesa/glapi/es2api/meson.build b/src/mesa/glapi/es2api/meson.build
+index be999c1ab3b..1c0b7e19c10 100644
+--- a/src/mesa/glapi/es2api/meson.build
++++ b/src/mesa/glapi/es2api/meson.build
+@@ -48,7 +48,7 @@ pkg.generate(
+   filebase : 'glesv2',
+   description : 'Mesa OpenGL ES 2.0 library',
+   version : meson.project_version(),
+-  libraries : libgles2,
++  libraries : [libgles2, ps5_sysmodule_libs],
+   libraries_private : gl_priv_libs,
+ )
+ 
+diff --git a/src/mesa/glapi/glapi/glapi.h b/src/mesa/glapi/glapi/glapi.h
+index 14575cc370c..d4936d964d6 100644
+--- a/src/mesa/glapi/glapi/glapi.h
++++ b/src/mesa/glapi/glapi/glapi.h
+@@ -72,7 +72,9 @@ struct _glapi_table;
+ _GLAPI_EXPORT extern __THREAD_INITIAL_EXEC struct _glapi_table * _mesa_glapi_tls_Dispatch;
+ _GLAPI_EXPORT extern __THREAD_INITIAL_EXEC void * _mesa_glapi_tls_Context;
+ 
+-#if DETECT_OS_WINDOWS && !defined(MAPI_MODE_SHARED_GLAPI)
++/* On the PS5 a library cannot import another's thread-local variable: the
++ * GL dispatch and context are reached through libgallium's functions. */
++#if (DETECT_OS_WINDOWS && !defined(MAPI_MODE_SHARED_GLAPI)) || defined(__PROSPERO__)
+ # define GET_DISPATCH() _mesa_glapi_get_dispatch()
+ # define GET_CURRENT_CONTEXT(C)  struct gl_context *C = (struct gl_context *) _mesa_glapi_get_context()
+ #else
+diff --git a/src/util/u_thread.h b/src/util/u_thread.h
+index 57ebdc51ba1..591a2c9511b 100644
+--- a/src/util/u_thread.h
++++ b/src/util/u_thread.h
+@@ -45,9 +45,12 @@
+  * still want to use normal TLS (which involves a function call, but not the
+  * expensive pthread_getspecific() or its equivalent).
+  */
+-#if DETECT_OS_APPLE
++#if DETECT_OS_APPLE || defined(__PROSPERO__)
+ /* Apple Clang emits wrappers when using thread_local that break module linkage,
+- * but not with __thread
++ * but not with __thread. In C++, an extern thread_local variable is reached
++ * through its initialization function (_ZTH...), a weak symbol the PS5's
++ * toolchain does not resolve when the variable is in another library (the GL
++ * dispatch, in libgallium): __thread variables have none.
+  */
+ #define __THREAD_INITIAL_EXEC __thread
+ #elif defined(__GLIBC__)

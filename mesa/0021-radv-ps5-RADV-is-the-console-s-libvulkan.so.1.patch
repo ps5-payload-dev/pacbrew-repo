@@ -1,0 +1,304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:22:57 +0000
+Subject: [PATCH] radv/ps5: RADV is the console's libvulkan.so.1
+
+The console has no Vulkan loader. There, build RADV as libvulkan.so.1, which
+exports the Vulkan API itself: vk_exports_gen.py generates the functions the
+Khronos loader exports (core 1.0-1.4, VK_KHR_surface, VK_KHR_swapchain,
+VK_KHR_display, VK_KHR_display_swapchain), each forwarding through the
+dispatch table of the runtime object behind its handle, so it reaches what
+vkGet*ProcAddr return. Only vk* and vk_icd* are exported (vulkan_ps5.sym).
+
+Programs link it with pkg-config vulkan, or dlopen("libvulkan.so.1") as SDL
+and others do on Linux; the soname is the loader's, and so is the version
+of the library and of vulkan.pc, the headers' (1.4.<VK_HEADER_VERSION>):
+programs such as vkQuake require a minimum version. vulkan.pc also names
+the system modules RADV calls (-lSceAgc -lSceAgcDriver -lSceVideoOut), and
+the library links their stubs, so the SDK's loader initializes them
+through libSceSysmodule before libvulkan is loaded.
+
+The console build requires -Dradv-build-id: RADV names its shader cache after
+its binary's build id, found through dl_iterate_phdr, which the console does
+not have; without it there was silently no device.
+
+The Linux host model of the PS5 winsys is unchanged: an ICD for the Khronos
+loader.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ meson.build                       |   8 ++
+ src/amd/vulkan/meson.build        |  61 ++++++++++++--
+ src/amd/vulkan/vulkan_ps5.sym     |   7 ++
+ src/vulkan/util/meson.build       |   4 +
+ src/vulkan/util/vk_exports_gen.py | 133 ++++++++++++++++++++++++++++++
+ 5 files changed, 204 insertions(+), 9 deletions(-)
+ create mode 100644 src/amd/vulkan/vulkan_ps5.sym
+ create mode 100644 src/vulkan/util/vk_exports_gen.py
+
+diff --git a/meson.build b/meson.build
+index 54fe19ecb23..eaa2e955a86 100644
+--- a/meson.build
++++ b/meson.build
+@@ -509,6 +509,14 @@ endif
+ if with_radv_ps5
+   pre_args += '-DRADV_PS5'
+ endif
++# The console build (a Linux host build of the PS5 winsys is a loadable ICD for
++# the Khronos loader instead). There is no Vulkan loader on the console: RADV
++# is libvulkan itself and exports the API (src/vulkan/util/vk_exports_gen.py).
++with_radv_ps5_console = with_radv_ps5 and host_machine.system() != 'linux'
++# The system modules RADV and its WSI call. A shared library links their stubs
++# (it is linked with -Wl,--no-undefined), and pkg-config hands them to the
++# program too, so that its crt initializes them through libSceSysmodule.
++ps5_sysmodule_libs = with_radv_ps5_console ? ['-lSceAgc', '-lSceAgcDriver', '-lSceVideoOut'] : []
+ 
+ with_gfxstream_emulated_android = with_gfxstream_vk and with_platform_android and host_machine.system() == 'linux'
+ if with_gfxstream_emulated_android
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 7068b2bd9d7..7a172fe39b2 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -283,6 +283,14 @@ if with_platform_android
+ endif
+ 
+ radv_build_id = get_option('radv-build-id')
++# RADV names its shader cache after the build id of the binary it is in, found
++# through dl_iterate_phdr, which the console does not have; without a name RADV
++# has no device. So the console build is given its build id.
++if radv_build_id == '' and with_radv_ps5 and host_machine.system() != 'linux'
++  error('The PS5 build needs -Dradv-build-id=<hex>, a hex string that changes ' +
++        'whenever the driver does (e.g. a SHA-1 of the Mesa version and the ' +
++        'patch): the console has no dladdr to identify the driver binary.')
++endif
+ if radv_build_id != ''
+   radv_flags += '-DRADV_BUILD_ID_OVERRIDE="' + radv_build_id + '"'
+ endif
+@@ -347,15 +355,50 @@ _radv_target = {
+ }
+ _radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer, radv_threaded_layer]
+ 
+-# A PS5 title cannot load a shared library, so the console build is an archive
+-# the title links; the host build of the PS5 winsys stays a loadable ICD.
+-if with_radv_ps5 and get_option('default_library') == 'static'
+-  # zlib, which the shader cache compresses with, comes from its subproject
+-  # for the console and installs as an archive of its own: the title links one.
+-  _radv_whole = []
+-  if dep_zlib.found() and dep_zlib.type_name() == 'internal'
+-    _radv_whole += subproject('zlib').get_variable('zlib')
+-  endif
++# zlib, which the shader cache compresses with, may come from its subproject;
++# a static RADV then carries it.
++_radv_whole = []
++if with_radv_ps5 and dep_zlib.found() and dep_zlib.type_name() == 'internal'
++  _radv_whole += subproject('zlib').get_variable('zlib')
++endif
++
++if with_radv_ps5_console
++  # The Vulkan version of the headers RADV is built with (1.4.<VK_HEADER_VERSION>),
++  # as the Khronos loader's library and vulkan.pc carry it.
++  _vk_header_version = fs.read(join_paths(meson.project_source_root(), 'include', 'vulkan', 'vulkan_core.h')) \
++    .split('#define VK_HEADER_VERSION ')[1].split('\n')[0].strip()
++  _vk_api_version = '1.4.' + _vk_header_version
++
++  # On the console RADV is libvulkan.so.1: there is no Vulkan loader, so the
++  # driver exports the Vulkan API itself (vk_exports_gen.py), and programs link
++  # it (pkg-config vulkan) or dlopen it as they would the Khronos loader.
++  _radv_sources += custom_target(
++    'radv_vk_exports',
++    input : [vk_exports_gen, vk_api_xml],
++    output : 'vk_exports.c',
++    command : [prog_python, '@INPUT0@', '--xml', '@INPUT1@', '--out-c', '@OUTPUT@'],
++    depend_files : vk_entrypoints_gen_depend_files,
++  )
++  libvulkan_radeon = shared_library(
++    'vulkan',
++    _radv_sources,
++    link_args : [ld_args_bsymbolic, ld_args_gc_sections, ps5_sysmodule_libs,
++                 '-Wl,--version-script,@0@'.format(join_paths(meson.current_source_dir(), 'vulkan_ps5.sym'))],
++    link_depends : files('vulkan_ps5.sym'),
++    link_whole : _radv_whole,
++    soversion : '1',
++    version : _vk_api_version,
++    kwargs : _radv_target,
++  )
++
++  pkg.generate(
++    name : 'vulkan',
++    filebase : 'vulkan',
++    description : 'Vulkan (Mesa RADV for the PlayStation 5)',
++    version : _vk_api_version,
++    libraries : [libvulkan_radeon, ps5_sysmodule_libs],
++  )
++elif with_radv_ps5 and get_option('default_library') == 'static'
+   libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target,
+                                     link_whole : _radv_whole)
+ else
+diff --git a/src/amd/vulkan/vulkan_ps5.sym b/src/amd/vulkan/vulkan_ps5.sym
+new file mode 100644
+index 00000000000..4beb8096239
+--- /dev/null
++++ b/src/amd/vulkan/vulkan_ps5.sym
+@@ -0,0 +1,7 @@
++{
++	global:
++		vk[A-Z]*;
++		vk_icd*;
++	local:
++		*;
++};
+diff --git a/src/vulkan/util/meson.build b/src/vulkan/util/meson.build
+index 086eb6ec5b3..b8598cba035 100644
+--- a/src/vulkan/util/meson.build
++++ b/src/vulkan/util/meson.build
+@@ -25,6 +25,10 @@ vk_entrypoints_gen_depend_files = [
+   files('vk_entrypoints.py'),
+   vk_entrypoints_depend_files,
+ ]
++# The vk* functions a loader exports, for a driver that is its own libvulkan
++# (the PlayStation 5, which has no loader).
++vk_exports_gen = files('vk_exports_gen.py')
++
+ vk_cmd_queue_gen_depend_files = [
+   files('vk_entrypoints.py'),
+   vk_entrypoints_depend_files,
+diff --git a/src/vulkan/util/vk_exports_gen.py b/src/vulkan/util/vk_exports_gen.py
+new file mode 100644
+index 00000000000..b4300e8ce01
+--- /dev/null
++++ b/src/vulkan/util/vk_exports_gen.py
+@@ -0,0 +1,133 @@
++# Copyright © 2026
++# SPDX-License-Identifier: MIT
++"""Generate the vk* functions a Vulkan loader exports, for a driver that is
++its own libvulkan (a platform without a loader, such as the PlayStation 5).
++
++An application then links libvulkan and calls vkCreateInstance and friends as
++it would anywhere else. Every function forwards to the dispatch table of the
++Vulkan runtime object behind its first (dispatchable) handle, so it reaches
++exactly what vkGetInstanceProcAddr/vkGetDeviceProcAddr return, layers
++included. Global commands go through vk_icdGetInstanceProcAddr(NULL, ...).
++
++Exported: the core API (1.0 to the newest version in the registry) and the
++WSI extensions the Khronos loader exports on platforms without a window
++system: VK_KHR_surface, VK_KHR_swapchain, VK_KHR_display and
++VK_KHR_display_swapchain. Anything else is reached through
++vkGetInstanceProcAddr/vkGetDeviceProcAddr, as with the Khronos loader.
++"""
++
++import argparse
++import os
++import sys
++
++from mako.template import Template
++
++sys.path.append(os.path.dirname(__file__))
++from vk_entrypoints import get_entrypoints_from_xml  # noqa: E402
++
++EXPORTED_EXTENSIONS = {
++    'VK_KHR_surface',
++    'VK_KHR_swapchain',
++    'VK_KHR_display',
++    'VK_KHR_display_swapchain',
++}
++
++TEMPLATE = Template("""\
++/* This file generated from ${filename}, don't edit directly. */
++
++#include "vk_command_buffer.h"
++#include "vk_device.h"
++#include "vk_instance.h"
++#include "vk_physical_device.h"
++#include "vk_queue.h"
++
++#include "util/macros.h"
++#include "util/u_atomic.h"
++
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
++
++static PFN_vkVoidFunction
++vk_exports_global(const char *name, PFN_vkVoidFunction *cache)
++{
++   PFN_vkVoidFunction func = p_atomic_read(cache);
++   if (func == NULL) {
++      func = vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, name);
++      p_atomic_set(cache, func);
++   }
++   return func;
++}
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName)
++{
++   return vk_icdGetInstanceProcAddr(instance, pName);
++}
++
++% for e in entrypoints:
++<% ret = '' if e.return_type == 'void' else 'return ' %>
++PUBLIC VKAPI_ATTR ${e.return_type} VKAPI_CALL
++vk${e.name}(${e.decl_params()})
++{
++  % if e.kind == 'global':
++   static PFN_vkVoidFunction cache;
++   PFN_vk${e.name} func = (PFN_vk${e.name})vk_exports_global("vk${e.name}", &cache);
++   ${ret}func(${e.call_params()});
++  % else:
++    % if e.name in ('DestroyInstance', 'DestroyDevice'):
++   /* vkDestroyInstance/vkDestroyDevice(VK_NULL_HANDLE) do nothing. */
++   if (${e.params[0].name} == VK_NULL_HANDLE)
++      return;
++    % endif
++   ${ret}${e.table}.${e.table_name}(${e.call_params()});
++  % endif
++}
++% endfor
++""")
++
++TABLES = {
++    'VkInstance': 'vk_instance_from_handle({0})->dispatch_table',
++    'VkPhysicalDevice': 'vk_physical_device_from_handle({0})->dispatch_table',
++    'VkDevice': 'vk_device_from_handle({0})->dispatch_table',
++    'VkQueue': 'vk_queue_from_handle({0})->base.device->dispatch_table',
++    'VkCommandBuffer': 'vk_command_buffer_from_handle({0})->base.device->dispatch_table',
++}
++
++
++def ext_name(ext):
++    return getattr(ext, 'name', ext)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--xml', required=True, action='append', dest='xml_files')
++    parser.add_argument('--out-c', required=True)
++    args = parser.parse_args()
++
++    entrypoints = []
++    for e in get_entrypoints_from_xml(args.xml_files, beta=False):
++        if e.guard is not None:
++            continue
++        exts = {ext_name(x) for x in e.extensions}
++        if e.core_version is None and not (exts & EXPORTED_EXTENSIONS):
++            continue
++        if e.name in ('GetInstanceProcAddr',):
++            continue
++
++        first = e.params[0].type
++        if first in TABLES:
++            e.kind = 'dispatch'
++            e.table = TABLES[first].format(e.params[0].name)
++            # Aliases share a union member with the function they alias.
++            e.table_name = e.alias.name if e.alias else e.name
++        else:
++            e.kind = 'global'
++        entrypoints.append(e)
++
++    with open(args.out_c, 'w', encoding='utf-8') as f:
++        f.write(TEMPLATE.render(entrypoints=entrypoints,
++                                filename=os.path.basename(__file__)))
++
++
++if __name__ == '__main__':
++    main()

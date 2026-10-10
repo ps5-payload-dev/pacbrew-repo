@@ -1,0 +1,794 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:41 +0000
+Subject: [PATCH] radv/ps5: on-disk shader cache in the title's folder
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  a33b5748144 Merge ps5-shader-cache: on-disk shader cache in the title's folder
+  035a22bc823 Merge ps5-shader-cache: a lookup does not make parts; the PS5 changes modes only when needed
+  2d1a8cf74fd Merge ps5-shader-cache: the mesa-db cache's exclusive mode
+---
+ docs/envvars.rst                              |   9 +
+ src/amd/vulkan/meson.build                    |   9 +-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c |   6 +
+ src/util/disk_cache_os.c                      |  40 +++-
+ src/util/mesa_cache_db.c                      | 202 +++++++++++++++---
+ src/util/mesa_cache_db.h                      |  18 ++
+ src/util/mesa_cache_db_multipart.c            | 158 ++++++++++++--
+ src/util/mesa_cache_db_multipart.h            |   3 +
+ 8 files changed, 394 insertions(+), 51 deletions(-)
+
+diff --git a/docs/envvars.rst b/docs/envvars.rst
+index 42f4541cd0d..16f98b65232 100644
+--- a/docs/envvars.rst
++++ b/docs/envvars.rst
+@@ -280,6 +280,15 @@ Core Mesa environment variables
+ 
+    specifies number of mesa-db cache parts, default is 50.
+ 
++.. envvar:: MESA_DISK_CACHE_DATABASE_EXCLUSIVE
++
++   if set to ``true``, this process alone uses the mesa-db cache: each part
++   is opened and locked once for the process's life (a part another process
++   holds is not used), accesses skip reopening and relocking the files, and
++   access times are written in batches. Faster where file operations are
++   slow and several threads read the cache at once. Default is ``false``,
++   except on the PS5, where a title's cache is its own.
++
+ .. envvar:: MESA_DISK_CACHE_DATABASE_EVICTION_SCORE_2X_PERIOD
+ 
+    Mesa-DB cache eviction algorithm calculates weighted score for the
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 2e29a60154c..24e9b189446 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -345,7 +345,14 @@ _radv_sources = [libradv_files, radv_entrypoints, radv_drirc, sha1_h, radix_sort
+ # A PS5 title cannot load a shared library, so the console build is an archive
+ # the title links; the host build of the PS5 winsys stays a loadable ICD.
+ if with_radv_ps5 and get_option('default_library') == 'static'
+-  libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target)
++  # zlib, which the shader cache compresses with, comes from its subproject
++  # for the console and installs as an archive of its own: the title links one.
++  _radv_whole = []
++  if dep_zlib.found() and dep_zlib.type_name() == 'internal'
++    _radv_whole += subproject('zlib').get_variable('zlib')
++  endif
++  libvulkan_radeon = static_library('vulkan_radeon', _radv_sources, kwargs : _radv_target,
++                                    link_whole : _radv_whole)
+ else
+   libvulkan_radeon = shared_library(
+     'vulkan_radeon',
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 0f40c5988a9..53c323bd059 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -239,6 +239,12 @@ radv_ps5_window_replayable(void)
+ static void
+ radv_ps5_platform_once(void)
+ {
++   /* RADV's shader cache in the title's own folder, as ps5vk kept its compiled
++    * shaders there (ps5vk-shader-cache), in the database form, which needs no
++    * file mapping. A title may choose otherwise, as on Linux. */
++   setenv("MESA_SHADER_CACHE_DIR", "/app0/radv-shader-cache", 0);
++   setenv("MESA_DISK_CACHE_DATABASE", "1", 0);
++
+    radv_ps5_agc_result = sceAgcInit(PS5_AGC_INIT_VERSION);
+    if (radv_ps5_agc_result != 0)
+       fprintf(stderr, "radv/ps5: sceAgcInit(%u) failed: 0x%08x\n", PS5_AGC_INIT_VERSION,
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index 66a3f5b18a5..eefa2d51526 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -104,6 +104,29 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
+ #include "util/ralloc.h"
+ #include "util/rand_xor.h"
+ 
++/* A PS5 title's cache stays open to the console's FTP service, which runs as
++ * another user: folders 0777 and files 0666, whatever the umask. Elsewhere
++ * the cache is the user's own. */
++#if defined(__PROSPERO__)
++#define DISK_CACHE_DIR_MODE 0777
++#define DISK_CACHE_FILE_MODE 0666
++#else
++#define DISK_CACHE_DIR_MODE 0700
++#define DISK_CACHE_FILE_MODE 0644
++#endif
++
++/* A change of mode is a metadata write, near a millisecond on the console, so
++ * it is made only when the mode is not already so. */
++static void
++disk_cache_share_file(UNUSED int fd)
++{
++#if defined(__PROSPERO__)
++   struct stat st;
++   if (fstat(fd, &st) == 0 && (st.st_mode & 0777) != DISK_CACHE_FILE_MODE)
++      fchmod(fd, DISK_CACHE_FILE_MODE);
++#endif
++}
++
+ /* Check if directory exists or if mkdir_if_needed param is set create a
+  * directory named 'path' if it does not already exist.
+  * This is for use by find_or_create_dir(). Use that instead.
+@@ -132,7 +155,11 @@ find_or_mkdir_if_needed(const char *path, bool mkdir_if_needed)
+    if (!mkdir_if_needed)
+       return -1;
+ 
+-   int ret = mkdir(path, 0700);
++   int ret = mkdir(path, DISK_CACHE_DIR_MODE);
++#if defined(__PROSPERO__)
++   if (ret == 0 && stat(path, &sb) == 0 && (sb.st_mode & 0777) != DISK_CACHE_DIR_MODE)
++      chmod(path, DISK_CACHE_DIR_MODE);
++#endif
+    if (ret == 0 || (ret == -1 && errno == EEXIST))
+      return 0;
+ 
+@@ -784,7 +811,7 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
+    if (asprintf(&filename_tmp, "%s.tmp", filename) == -1)
+       goto done;
+ 
+-   fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
++   fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, DISK_CACHE_FILE_MODE);
+ 
+    /* Make the two-character subdirectory within the cache as needed. */
+    if (fd == -1) {
+@@ -793,10 +820,11 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
+ 
+       make_cache_file_directory(dc_job->cache, dc_job->key);
+ 
+-      fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
++      fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, DISK_CACHE_FILE_MODE);
+       if (fd == -1)
+          goto done;
+    }
++   disk_cache_share_file(fd);
+ 
+    /* With the temporary file open, we take an exclusive flock on
+     * it. If the flock fails, then another process still has the file
+@@ -1091,8 +1119,9 @@ disk_cache_touch_cache_user_marker(char *path)
+ 
+    struct stat attr;
+    if (stat(marker_path, &attr) == -1) {
+-      int fd = open(marker_path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
++      int fd = open(marker_path, O_WRONLY | O_CREAT | O_CLOEXEC, DISK_CACHE_FILE_MODE);
+       if (fd != -1) {
++         disk_cache_share_file(fd);
+          close(fd);
+       }
+    } else if (now - attr.st_mtime > 60 * 60 * 24 /* One day */) {
+@@ -1111,9 +1140,10 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
+    if (path == NULL)
+       goto path_fail;
+ 
+-   fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++   fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, DISK_CACHE_FILE_MODE);
+    if (fd == -1)
+       goto path_fail;
++   disk_cache_share_file(fd);
+ 
+    struct stat sb;
+    if (fstat(fd, &sb) == -1)
+diff --git a/src/util/mesa_cache_db.c b/src/util/mesa_cache_db.c
+index 0daac81de12..ae12f117f3b 100644
+--- a/src/util/mesa_cache_db.c
++++ b/src/util/mesa_cache_db.c
+@@ -16,6 +16,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/file.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+ #include "crc32.h"
+@@ -56,6 +57,8 @@ struct mesa_index_db_hash_entry {
+    uint64_t last_access_time;
+    uint32_t size;
+    bool evicted;
++   /* The access time in memory is newer than the index file's (owned). */
++   bool time_dirty;
+ };
+ 
+ static inline bool mesa_db_seek_end(FILE *file)
+@@ -113,6 +116,10 @@ mesa_db_lock(struct mesa_cache_db *db)
+ {
+    simple_mtx_lock(&db->flock_mtx);
+ 
++   /* An owned database's files stay open and locked. */
++   if (db->owned)
++      return true;
++
+    if (!mesa_db_reopen_file(&db->index) ||
+        !mesa_db_reopen_file(&db->cache))
+       goto close_files;
+@@ -139,11 +146,13 @@ close_files:
+ static void
+ mesa_db_unlock(struct mesa_cache_db *db)
+ {
+-   mesa_db_flock(db->index.file, LOCK_UN);
+-   mesa_db_flock(db->cache.file, LOCK_UN);
++   if (!db->owned) {
++      mesa_db_flock(db->index.file, LOCK_UN);
++      mesa_db_flock(db->cache.file, LOCK_UN);
+ 
+-   mesa_db_close_file(&db->index);
+-   mesa_db_close_file(&db->cache);
++      mesa_db_close_file(&db->index);
++      mesa_db_close_file(&db->cache);
++   }
+ 
+    simple_mtx_unlock(&db->flock_mtx);
+ }
+@@ -412,15 +421,84 @@ mesa_db_reload(struct mesa_cache_db *db)
+    return mesa_db_load(db, true);
+ }
+ 
++/* Brings memory up to date with the files, which another process may have
++ * changed. An owned database's memory is the database. */
++static bool
++mesa_db_refresh(struct mesa_cache_db *db)
++{
++   if (db->owned)
++      return true;
++
++   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
++      return false;
++
++   return mesa_db_update_index(db);
++}
++
++/* Writes the access times read hits changed in memory to the index file
++ * (owned databases, which do not write one at every hit). */
++static bool
++mesa_db_write_times(struct mesa_cache_db *db)
++{
++   struct mesa_index_db_file_entry index_entry;
++   bool success = true;
++
++   if (!db->dirty_times)
++      return true;
++
++   hash_table_foreach(&db->index_db->table, entry) {
++      struct mesa_index_db_hash_entry *hash_entry = entry->data;
++
++      if (!hash_entry->time_dirty)
++         continue;
++
++      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
++          !mesa_db_read(db->index.file, &index_entry) ||
++          index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset) {
++         success = false;
++         break;
++      }
++
++      index_entry.last_access_time = hash_entry->last_access_time;
++
++      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
++          !mesa_db_write(db->index.file, &index_entry)) {
++         success = false;
++         break;
++      }
++
++      hash_entry->time_dirty = false;
++   }
++
++   fflush(db->index.file);
++   if (success)
++      db->dirty_times = 0;
++
++   return success;
++}
++
+ static FILE *
+ mesa_db_fopen(const char *path)
+ {
+    /* The fopen("r+b") mode doesn't auto-create new file, hence we need to
+     * explicitly create the file first.
+     */
++#if defined(__PROSPERO__)
++   /* A PS5 title's files stay open to the console's FTP service, which runs as
++    * another user: 0666, whatever the umask. A change of mode is a metadata
++    * write, near a millisecond on the console, and the files are opened at
++    * every access, so the mode changes only when it is not already so. */
++   int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0666);
++   if (fd < 0)
++      return NULL;
++   struct stat st;
++   if (fstat(fd, &st) == 0 && (st.st_mode & 0777) != 0666)
++      fchmod(fd, 0666);
++#else
+    int fd = open(path, O_CREAT | O_CLOEXEC | O_RDWR, 0644);
+    if (fd < 0)
+       return NULL;
++#endif
+ 
+    FILE *f = fdopen(fd, "r+b");
+    if (!f)
+@@ -539,6 +617,8 @@ mesa_db_compact(struct mesa_cache_db *db, int64_t blob_size,
+    unsigned int i = 0;
+ 
+    /* reload index to sync the last access times */
++   if (db->owned && !mesa_db_write_times(db))
++      return false;
+    if (!remove_entry && !mesa_db_reload(db))
+       return false;
+ 
+@@ -675,6 +755,15 @@ cleanup:
+       fclose(compacted_cache);
+    free(entries);
+ 
++   /* An owned database's streams outlive the compaction, which wrote the
++    * files through others: reopen them, so no buffer holds what was there. */
++   if (db->owned) {
++      mesa_db_close_file(&db->cache);
++      mesa_db_close_file(&db->index);
++      if (!mesa_db_reopen_file(&db->cache) || !mesa_db_reopen_file(&db->index))
++         success = false;
++   }
++
+    /* reload compacted index */
+    if (success && !mesa_db_reload(db))
+       success = false;
+@@ -682,8 +771,8 @@ cleanup:
+    return success;
+ }
+ 
+-bool
+-mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
++static bool
++mesa_cache_db_open_impl(struct mesa_cache_db *db, const char *cache_path, bool own)
+ {
+    if (!mesa_db_open_file(&db->cache, cache_path, "mesa_cache.db"))
+       return false;
+@@ -691,9 +780,24 @@ mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
+    if (!mesa_db_open_file(&db->index, cache_path, "mesa_cache.idx"))
+       goto close_cache;
+ 
++   /* Owned: locked for this process's whole life, or not at all when another
++    * holds it, since its per-access locks would then wait forever. The locks
++    * are on descriptors of their own: the streams are reopened after a
++    * compaction, which rewrites the files through other streams. */
++   db->lock_fds[0] = db->lock_fds[1] = -1;
++   if (own) {
++      db->lock_fds[0] = open(db->cache.path, O_RDONLY | O_CLOEXEC);
++      db->lock_fds[1] = open(db->index.path, O_RDONLY | O_CLOEXEC);
++      if (db->lock_fds[0] < 0 || db->lock_fds[1] < 0 ||
++          flock(db->lock_fds[0], LOCK_EX | LOCK_NB) < 0 ||
++          flock(db->lock_fds[1], LOCK_EX | LOCK_NB) < 0)
++         goto close_locks;
++      db->owned = true;
++   }
++
+    db->mem_ctx = ralloc_context(NULL);
+    if (!db->mem_ctx)
+-      goto close_index;
++      goto close_locks;
+ 
+    simple_mtx_init(&db->flock_mtx, mtx_plain);
+ 
+@@ -712,7 +816,13 @@ destroy_mtx:
+    simple_mtx_destroy(&db->flock_mtx);
+ 
+    ralloc_free(db->mem_ctx);
+-close_index:
++close_locks:
++   for (unsigned i = 0; i < 2; i++) {
++      if (db->lock_fds[i] >= 0)
++         close(db->lock_fds[i]);
++      db->lock_fds[i] = -1;
++   }
++   db->owned = false;
+    mesa_db_free_file(&db->index);
+ close_cache:
+    mesa_db_free_file(&db->cache);
+@@ -720,6 +830,18 @@ close_cache:
+    return false;
+ }
+ 
++bool
++mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
++{
++   return mesa_cache_db_open_impl(db, cache_path, false);
++}
++
++bool
++mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path)
++{
++   return mesa_cache_db_open_impl(db, cache_path, true);
++}
++
+ bool
+ mesa_db_wipe_path(const char *cache_path)
+ {
+@@ -739,12 +861,23 @@ mesa_db_wipe_path(const char *cache_path)
+ void
+ mesa_cache_db_close(struct mesa_cache_db *db)
+ {
++   if (db->owned && db->alive) {
++      simple_mtx_lock(&db->flock_mtx);
++      mesa_db_write_times(db);
++      simple_mtx_unlock(&db->flock_mtx);
++   }
++
+    _mesa_hash_table_u64_destroy(db->index_db);
+    simple_mtx_destroy(&db->flock_mtx);
+    ralloc_free(db->mem_ctx);
+ 
+    mesa_db_free_file(&db->index);
+    mesa_db_free_file(&db->cache);
++
++   for (unsigned i = 0; i < 2; i++) {
++      if (db->owned && db->lock_fds[i] >= 0)
++         close(db->lock_fds[i]);
++   }
+ }
+ 
+ void
+@@ -777,10 +910,7 @@ mesa_cache_db_read_entry(struct mesa_cache_db *db,
+    if (!db->alive)
+       goto fail;
+ 
+-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
+-      goto fail_fatal;
+-
+-   if (!mesa_db_update_index(db))
++   if (!mesa_db_refresh(db))
+       goto fail_fatal;
+ 
+    hash_entry = _mesa_hash_table_u64_search(db->index_db, hash);
+@@ -803,21 +933,34 @@ mesa_cache_db_read_entry(struct mesa_cache_db *db,
+        util_hash_crc32(data, cache_entry.size) != cache_entry.crc)
+       goto fail_fatal;
+ 
+-   if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+-       !mesa_db_read(db->index.file, &index_entry) ||
+-       !mesa_db_index_entry_valid(&index_entry) ||
+-       index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset ||
+-       index_entry.size != hash_entry->size)
+-      goto fail_fatal;
++   if (db->owned) {
++      /* The index file's copy of the access time is written in batches: a
++       * write at every hit, under the lock, made readers on other threads
++       * wait for it. */
++      hash_entry->last_access_time = os_time_get_nano();
++      if (!hash_entry->time_dirty) {
++         hash_entry->time_dirty = true;
++         db->dirty_times++;
++      }
++      if (db->dirty_times >= 256 && !mesa_db_write_times(db))
++         goto fail_fatal;
++   } else {
++      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
++          !mesa_db_read(db->index.file, &index_entry) ||
++          !mesa_db_index_entry_valid(&index_entry) ||
++          index_entry.cache_db_file_offset != hash_entry->cache_db_file_offset ||
++          index_entry.size != hash_entry->size)
++         goto fail_fatal;
+ 
+-   index_entry.last_access_time = os_time_get_nano();
+-   hash_entry->last_access_time = index_entry.last_access_time;
++      index_entry.last_access_time = os_time_get_nano();
++      hash_entry->last_access_time = index_entry.last_access_time;
+ 
+-   if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
+-       !mesa_db_write(db->index.file, &index_entry))
+-      goto fail_fatal;
++      if (!mesa_db_seek(db->index.file, hash_entry->index_db_file_offset) ||
++          !mesa_db_write(db->index.file, &index_entry))
++         goto fail_fatal;
+ 
+-   fflush(db->index.file);
++      fflush(db->index.file);
++   }
+ 
+    mesa_db_unlock(db);
+ 
+@@ -864,7 +1007,7 @@ mesa_cache_db_entry_write(struct mesa_cache_db *db,
+    if (!db->alive)
+       goto fail;
+ 
+-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
++   if (!db->owned && mesa_db_uuid_changed(db) && !mesa_db_reload(db))
+       goto fail_fatal;
+ 
+    if (!mesa_db_seek_end(db->cache.file))
+@@ -874,7 +1017,7 @@ mesa_cache_db_entry_write(struct mesa_cache_db *db,
+       if (!mesa_db_compact(db, MAX2(blob_size, mesa_cache_db_eviction_size(db)),
+                            NULL))
+          goto fail_fatal;
+-   } else {
++   } else if (!db->owned) {
+       if (!mesa_db_update_index(db))
+          goto fail_fatal;
+    }
+@@ -947,10 +1090,7 @@ mesa_cache_db_entry_remove(struct mesa_cache_db *db,
+    if (!db->alive)
+       goto fail;
+ 
+-   if (mesa_db_uuid_changed(db) && !mesa_db_reload(db))
+-      goto fail_fatal;
+-
+-   if (!mesa_db_update_index(db))
++   if (!mesa_db_refresh(db))
+       goto fail_fatal;
+ 
+    hash_entry = _mesa_hash_table_u64_search(db->index_db, hash);
+@@ -1033,7 +1173,7 @@ mesa_cache_db_eviction_score(struct mesa_cache_db *db)
+    if (!db->alive)
+       goto fail;
+ 
+-   if (!mesa_db_reload(db))
++   if (!db->owned && !mesa_db_reload(db))
+       goto fail_fatal;
+ 
+    num_entries = _mesa_hash_table_num_entries(&db->index_db->table);
+diff --git a/src/util/mesa_cache_db.h b/src/util/mesa_cache_db.h
+index f6097d81271..6c5abb3eedd 100644
+--- a/src/util/mesa_cache_db.h
++++ b/src/util/mesa_cache_db.h
+@@ -37,12 +37,24 @@ struct mesa_cache_db {
+    void *mem_ctx;
+    uint64_t uuid;
+    bool alive;
++   /* Opened by mesa_cache_db_open_exclusive: this process alone uses the
++    * files, which stay open and locked, and memory holds the database. */
++   bool owned;
++   /* An owned database's locks, on descriptors of their own, so that the
++    * streams can be reopened without letting go. */
++   int lock_fds[2];
++   /* Access times read hits changed in memory but not yet in the index file. */
++   unsigned dirty_times;
+ };
+ 
+ #if DETECT_OS_WINDOWS == 0
+ bool
+ mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path);
+ 
++/* For a process that alone uses the database: fails when another holds it. */
++bool
++mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path);
++
+ void
+ mesa_cache_db_close(struct mesa_cache_db *db);
+ 
+@@ -82,6 +94,12 @@ mesa_cache_db_open(struct mesa_cache_db *db, const char *cache_path)
+    return false;
+ }
+ 
++static inline bool
++mesa_cache_db_open_exclusive(struct mesa_cache_db *db, const char *cache_path)
++{
++   return false;
++}
++
+ static inline void
+ mesa_cache_db_close(struct mesa_cache_db *db)
+ {
+diff --git a/src/util/mesa_cache_db_multipart.c b/src/util/mesa_cache_db_multipart.c
+index d6cc5ab0a6f..8c3c24b0cf1 100644
+--- a/src/util/mesa_cache_db_multipart.c
++++ b/src/util/mesa_cache_db_multipart.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <stdlib.h>
+ #include <sys/stat.h>
+ 
+ #include "detect_os.h"
+@@ -11,6 +12,83 @@
+ #include "mesa_cache_db_multipart.h"
+ #include "u_debug.h"
+ 
++/* A PS5 title's cache is in its own folder, used by it alone. */
++#if defined(__PROSPERO__)
++#define EXCLUSIVE_DEFAULT true
++#else
++#define EXCLUSIVE_DEFAULT false
++#endif
++
++#if !DETECT_OS_WINDOWS
++/* The parts opened exclusively, by path: a second cache of this process on
++ * the same path shares them, as their locks would otherwise shut it out. */
++struct owned_part {
++   char *path;
++   struct mesa_cache_db *db;
++   unsigned refs;
++   struct owned_part *next;
++};
++
++static simple_mtx_t owned_parts_lock = SIMPLE_MTX_INITIALIZER;
++static struct owned_part *owned_parts;
++
++static struct mesa_cache_db *
++owned_part_open(const char *path)
++{
++   struct mesa_cache_db *db = NULL;
++
++   simple_mtx_lock(&owned_parts_lock);
++   for (struct owned_part *p = owned_parts; p; p = p->next) {
++      if (!strcmp(p->path, path)) {
++         p->refs++;
++         db = p->db;
++         goto done;
++      }
++   }
++
++   struct owned_part *p = calloc(1, sizeof(*p));
++   db = calloc(1, sizeof(*db));
++   if (p && db)
++      p->path = strdup(path);
++   if (!p || !db || !p->path || !mesa_cache_db_open_exclusive(db, path)) {
++      if (p)
++         free(p->path);
++      free(p);
++      free(db);
++      db = NULL;
++      goto done;
++   }
++   p->db = db;
++   p->refs = 1;
++   p->next = owned_parts;
++   owned_parts = p;
++
++done:
++   simple_mtx_unlock(&owned_parts_lock);
++   return db;
++}
++
++static void
++owned_part_close(struct mesa_cache_db *db)
++{
++   simple_mtx_lock(&owned_parts_lock);
++   for (struct owned_part **link = &owned_parts; *link; link = &(*link)->next) {
++      struct owned_part *p = *link;
++      if (p->db != db)
++         continue;
++      if (--p->refs == 0) {
++         *link = p->next;
++         mesa_cache_db_close(p->db);
++         free(p->db);
++         free(p->path);
++         free(p);
++      }
++      break;
++   }
++   simple_mtx_unlock(&owned_parts_lock);
++}
++#endif
++
+ bool
+ mesa_cache_db_multipart_open(struct mesa_cache_db_multipart *db,
+                              const char *cache_path)
+@@ -19,6 +97,7 @@ mesa_cache_db_multipart_open(struct mesa_cache_db_multipart *db,
+    return false;
+ #else
+    db->num_parts = debug_get_num_option("MESA_DISK_CACHE_DATABASE_NUM_PARTS", 50);
++   db->exclusive = debug_get_bool_option("MESA_DISK_CACHE_DATABASE_EXCLUSIVE", EXCLUSIVE_DEFAULT);
+    db->cache_path = cache_path;
+    db->parts = calloc(db->num_parts, sizeof(*db->parts));
+    if (!db->parts)
+@@ -47,20 +126,39 @@ mesa_cache_db_multipart_init_part_locked(struct mesa_cache_db_multipart *db,
+    if (asprintf(&part_path, "%s/part%u", db->cache_path, part) == -1)
+       return false;
+ 
+-   if (mkdir(part_path, 0755) == -1 && errno != EEXIST)
++#if defined(__PROSPERO__)
++   /* A PS5 title's folders stay open to the console's FTP service, which
++    * runs as another user: 0777, whatever the umask, parts an earlier build
++    * made included. A change of mode is a metadata write, near a millisecond
++    * on the console, so it is made only when needed. */
++   struct stat st;
++   if (mkdir(part_path, 0777) == -1 && errno != EEXIST)
+       goto free_path;
+-
+-   db_part = calloc(1, sizeof(*db_part));
+-   if (!db_part)
++   if (stat(part_path, &st) == 0 && (st.st_mode & 0777) != 0777)
++      chmod(part_path, 0777);
++#else
++   if (mkdir(part_path, 0755) == -1 && errno != EEXIST)
+       goto free_path;
++#endif
+ 
+-   /* DB opening may fail only in a case of a severe problem,
+-    * like IO error.
+-    */
+-   db_opened = mesa_cache_db_open(db_part, part_path);
+-   if (!db_opened) {
+-      free(db_part);
+-      goto free_path;
++   if (db->exclusive) {
++      db_part = owned_part_open(part_path);
++      db_opened = db_part != NULL;
++      if (!db_opened)
++         goto free_path;
++   } else {
++      db_part = calloc(1, sizeof(*db_part));
++      if (!db_part)
++         goto free_path;
++
++      /* DB opening may fail only in a case of a severe problem,
++       * like IO error.
++       */
++      db_opened = mesa_cache_db_open(db_part, part_path);
++      if (!db_opened) {
++         free(db_part);
++         goto free_path;
++      }
+    }
+ 
+    if (db->max_cache_size)
+@@ -80,6 +178,29 @@ free_path:
+ #endif
+ }
+ 
++/* Parts are made by writes. A lookup that misses would otherwise make every
++ * part, with its folder and files, while an absent part holds nothing. */
++static bool
++mesa_cache_db_multipart_part_exists(struct mesa_cache_db_multipart *db,
++                                    unsigned int part)
++{
++#if DETECT_OS_WINDOWS
++   return false;
++#else
++   char *part_path = NULL;
++   struct stat st;
++   bool exists;
++
++   if (asprintf(&part_path, "%s/part%u", db->cache_path, part) == -1)
++      return true;
++
++   exists = stat(part_path, &st) == 0 && S_ISDIR(st.st_mode);
++   free(part_path);
++
++   return exists;
++#endif
++}
++
+ static bool
+ mesa_cache_db_multipart_init_part(struct mesa_cache_db_multipart *db,
+                                   unsigned int part)
+@@ -100,10 +221,16 @@ void
+ mesa_cache_db_multipart_close(struct mesa_cache_db_multipart *db)
+ {
+    while (db->num_parts--) {
+-      if (db->parts[db->num_parts]) {
+-         mesa_cache_db_close(db->parts[db->num_parts]);
+-         free(db->parts[db->num_parts]);
++      if (!db->parts[db->num_parts])
++         continue;
++#if !DETECT_OS_WINDOWS
++      if (db->exclusive) {
++         owned_part_close(db->parts[db->num_parts]);
++         continue;
+       }
++#endif
++      mesa_cache_db_close(db->parts[db->num_parts]);
++      free(db->parts[db->num_parts]);
+    }
+ 
+    free(db->parts);
+@@ -133,6 +260,9 @@ mesa_cache_db_multipart_read_entry(struct mesa_cache_db_multipart *db,
+    for (unsigned int i = 0; i < db->num_parts; i++) {
+       unsigned int part = (last_read_part + i) % db->num_parts;
+ 
++      if (!db->parts[part] && !mesa_cache_db_multipart_part_exists(db, part))
++         continue;
++
+       if (!mesa_cache_db_multipart_init_part(db, part))
+          break;
+ 
+diff --git a/src/util/mesa_cache_db_multipart.h b/src/util/mesa_cache_db_multipart.h
+index d3cca82c2ab..512faf9937d 100644
+--- a/src/util/mesa_cache_db_multipart.h
++++ b/src/util/mesa_cache_db_multipart.h
+@@ -18,6 +18,9 @@ struct mesa_cache_db_multipart {
+    const char *cache_path;
+    uint64_t max_cache_size;
+    simple_mtx_t lock;
++   /* The parts are this process's alone (MESA_DISK_CACHE_DATABASE_EXCLUSIVE):
++    * opened once and shared by every cache of the process on the same path. */
++   bool exclusive;
+ };
+ 
+ bool

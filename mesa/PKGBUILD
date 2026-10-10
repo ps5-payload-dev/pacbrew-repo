@@ -1,57 +1,156 @@
 pkgname=ps5-payload-mesa
-pkgver=22.1.7
+pkgver=26.2.0
 pkgrel=1
-pkgdesc="Open-source OpenGL drivers"
+pkgdesc="Open-source Vulkan, OpenGL and OpenGL ES drivers (RADV, zink)"
 url="https://www.mesa3d.org/"
 arch=('any')
 license=("MIT AND BSD-3-Clause AND SGI-B-2.0")
-
 options=(!strip libtool staticlibs)
-source=("https://mesa.freedesktop.org/archive/older-versions/22.x/mesa-$pkgver.tar.xz")
-sha256sums=('da838eb2cf11d0e08d0e9944f6bd4d96987fdc59ea2856f8c70a31a82b355d89')
+source=("https://mesa.freedesktop.org/archive/mesa-${pkgver}.tar.xz"
+	"0001-radv-a-PS5-winsys-on-AGC-without-DRM.patch"
+	"0002-radv-ps5-the-console-s-GPU-GFX1013-with-AGC-s-rings.patch"
+	"0003-radv-ps5-report-what-the-GPU-can-do-and-nothing-it-c.patch"
+	"0004-radv-ps5-geometry-shaders-run-as-compute-with-transf.patch"
+	"0005-radv-ps5-placed-maps-ray-tracing-timestamps-and-spar.patch"
+	"0006-wsi-radv-no-libdrm-and-no-SDMA.patch"
+	"0007-radv-ps5-geometry-shaders-as-compute-for-shader-obje.patch"
+	"0008-radv-ps5-a-compute-and-transfer-queue-family-on-the-.patch"
+	"0009-radv-ps5-an-integrated-GPU-s-memory-types-and-host-p.patch"
+	"0010-radv-ps5-tessellation-as-compute-with-geometry-shade.patch"
+	"0011-wsi-VK_KHR_display-on-VideoOut.patch"
+	"0012-radv-ps5-mesh-and-task-shaders.patch"
+	"0013-radv-ps5-ray-tracing-group-handles-captured-and-repl.patch"
+	"0014-radv-ps5-on-disk-shader-cache-in-the-title-s-folder.patch"
+	"0015-radv-ps5-submission-timing-CLFLUSHOPT-and-the-suspen.patch"
+	"0016-radv-threaded-command-buffer-recording-RADV_THREADED.patch"
+	"0017-radv-ps5-declare-the-console-s-functions-in-include-.patch"
+	"0018-radv-ps5-build-the-Linux-host-model-on-any-CPU.patch"
+	"0019-radv-ps5-say-why-the-device-cannot-be-set-up.patch"
+	"0020-util-memstream-a-temporary-file-where-libc-has-no-op.patch"
+	"0021-radv-ps5-RADV-is-the-console-s-libvulkan.so.1.patch"
+	"0022-c11-Mesa-s-threads-under-names-of-their-own-on-the-P.patch"
+	"0023-gallium-OpenGL-on-the-PS5-console-through-zink.patch"
+	"0024-zink-kopper-surfaces-on-VK_KHR_display.patch"
+	"0025-egl-the-videoout-platform-EGL-on-a-VK_KHR_display-th.patch"
+	"0026-glapi-libGL.so.1-for-EGL-without-GLX.patch"
+	"0027-addrlib-the-PS5-s-CPU-has-AVX2.patch"
+	"0028-radv-ps5-the-shader-cache-in-data-where-there-is-no-.patch")
+
+sha256sums=('efd4bb08cdb7c365a812cd4e6c9202ab55b2f22cdcd13c7d6c4f9647b799a4ef'
+	    '4e3c89fc8559c3663d2f9299bef2809f7e6147fd8f81508b2f9633a9e05260ab'
+	    '55a16908578151a7e0e749b58e4df59f7d08e982bddf3485b0703682aa2f1ee0'
+	    '4865d3774f90dd7b44386f2409ffea66641cadc2fbdebd28d8619de123c63118'
+	    'c331fc5b7fd1e8b4d406e5daba8a755e23dc473d88a3205b0a2a5ee8e5850589'
+	    '4e2917727e809388ce00be1bc07ea27e685c0eaa735a3fb8a774d4723164f84a'
+	    '3d76dae8924e532f07a7f5f39f365229d9d7bafad133fcae6ef283cb2c9f3f97'
+	    'a3d0cb96752500cba499d404e28656a4233743ae8614928567d1d67edb008591'
+	    'f1eda60ef0bc54c3154e7e4df91e1e6f92ea2416bfa2c32471ef8c1a8bc7d5e5'
+	    '771d41d28dc81493d4429a567c80fa16a3e465eb83895ec79bb13a7fb171fa70'
+	    '18794c9214b5691a51a16d790530c0865ed8ffe1433ed36902d6c72f1f04a28c'
+	    '3bce97cc0e69499c4725ab02c9990022b811837c7cfb9525c470681165c3a03e'
+	    '64b0808d32ca99af36e707d4b6c5694d0151851bae8113321927a95e7af3a048'
+	    '2ff07c0ab7e2eb2e7f4d42287af73b3ed6017ca6aa1f72d12ac5c72cd1c3a99f'
+	    'a3b44896c078e1bb241ef1ce6655868b2a5453671273e10e1a7ed43f3d8d6399'
+	    'd199e882d42f8874e87af03f34972ed0a80700c840c2e0ad399bee474c78f2cc'
+	    '874e7fd066a45e2e3adeec200385d1d66b718deb18b329e3a1085ddda5cc847d'
+	    '8b6378701988c49fca761a41fcd88ed09f71777e619392a08a0cee7d81907e9f'
+	    '06d80fc608c809eb4aaaefe608911c0c528363347763f7e57dece3c4cb795912'
+	    'e79606c42d6671f2c57f280e14a3f5902497c8a37bb1c8b93e2da02358390473'
+	    '19c6a327c97a14191f3206bf4425c0ea7528e789d042bad3c34ece571f9dca75'
+	    '80c8dbdc84264bd0d9fb1444b0d4395c587f8f2c8325c206b44f7780e18b0f22'
+	    '1abab6a5944ec4955a36c7ff6a4cf2b8ee7264647dfd97575b0c47785781cb86'
+	    '96edb5279ee1fbb29bda09b8927537169356905edf2ff3515a71efbe3656edf9'
+	    '7b175f5c5028a2bfe7e7f330d4fdbc7c85ee3bcb6b4bb24c999bca8e86e737c6'
+	    '97e7881d9c05fb4cd8238832fcb8ec94d0e1f74a2c56d53cd894d9c2629ea588'
+	    '1849933db1af3d3bcec71e4f0eef6861ac168a6f34157491e8b553b5de13b588'
+	    '14eaadee38667a91643dfb3d8f718d88b989b8c33798a453adfde7f8d993435c'
+	    '41d2c63535427671284e09e7e526a6c07ec57bd76529493d979e7397835f3e15')
 
 groups=('ps5-payload-dev' 'ps5-payload-gl')
-makedepends=('ps5-payload-sdk' 'ps5-payload-llvm' 'ps5-payload-libcxx'
-	'ps5-payload-openlibm' 'ps5-payload-zlib' 'ps5-payload-expat'
-	'ps5-payload-zstd')
+makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx' 'ps5-payload-openlibm'
+	     'ps5-payload-zlib' 'ps5-payload-zstd')
 
 prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
-
     cd mesa-$pkgver
 
-    sed -i 's|config-tool|cmake|g' meson.build
-    sed -i 's|DETECT_OS_UNIX|0|g' src/util/log.c # no syslog
-    sed -i 's|open_memstream|NULL; //|g' src/util/memstream.c # FIXME
-    sed -i 's|-DUSE_ELF_TLS||g' meson.build
-    sed -i 's|#define CACHE_LINE_SIZE 64|#define CACHE_LINE_SIZE 128|g' src/util/macros.h
+    local p
+    for p in "${srcdir}"/[0-9][0-9][0-9][0-9]-*.patch; do
+	echo "Applying $(basename "$p")"
+	patch -Np1 -i "$p"
+    done
 }
 
 build() {
-    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
     cd mesa-$pkgver
 
-    export CFLAGS="-Wno-thread-safety-analysis"
-    export CXXFLAGS="-Wno-thread-safety-analysis -std=c++17"
-    ${MESON} setup builddir \
-	     -Dosmesa=true \
-	     -Dplatforms= \
-	     -Dvulkan-drivers= \
-	     -Dgallium-drivers=swrast \
-	     -Degl=disabled \
-	     -Dgbm=disabled \
-	     -Dglx=disabled \
-	     -Dgles1=disabled \
-	     -Dgles2=disabled \
-	     -Dshared-glapi=disabled \
-	     -Dllvm=enabled \
-	     -Dshared-llvm=disabled \
-	     -Dcpp_rtti=false \
-	     -Dopengl=true
+    # build host tools
+    meson setup builddir-host \
+	  -Dbuildtype=release \
+	  -Dmesa-clc=enabled \
+	  -Dinstall-mesa-clc=true \
+	  -Dgallium-drivers= \
+	  -Dvulkan-drivers= \
+	  -Dplatforms= \
+	  -Dglx=disabled \
+	  -Degl=disabled \
+	  -Dgbm=disabled \
+	  -Dopengl=false \
+	  -Dgles1=disabled \
+	  -Dgles2=disabled \
+	  -Dllvm=enabled \
+	  -Dvalgrind=disabled \
+	  -Dlibunwind=disabled \
+	  -Dzstd=disabled \
+	  -Dexpat=disabled \
+	  -Dxmlconfig=disabled \
+	  -Dbuild-tests=false
 
-    ${MESON} compile -vC builddir
+    meson compile -C builddir-host \
+	  src/compiler/clc/mesa_clc \
+	  src/compiler/spirv/vtn_bindgen2
+
+    export PATH="$PWD/builddir-host/src/compiler/clc:$PATH"
+    export PATH="$PWD/builddir-host/src/compiler/spirv:$PATH"
+    
+    # build target libs
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+
+    local build_id
+    build_id=$(cat <(echo "${pkgver}") "${srcdir}"/[0-9][0-9][0-9][0-9]-*.patch \
+		   | sha1sum | cut -d' ' -f1)
+
+    ${MESON} setup builddir \
+	     -Ddefault_library=shared \
+	     -Dbuildtype=release \
+	     -Db_ndebug=true \
+	     -Dradv-build-id=${build_id} \
+	     -Dradv-winsys=ps5 \
+	     -Dvulkan-drivers=amd \
+	     -Dvulkan-layers= \
+	     -Dgallium-drivers=zink \
+	     -Dplatforms=videoout \
+	     -Degl=enabled \
+	     -Dopengl=true \
+	     -Dgles2=enabled \
+	     -Dgles1=disabled \
+	     -Dglx=disabled \
+	     -Dgbm=disabled \
+	     -Dmesa-clc=system \
+	     -Dllvm=disabled \
+	     -Dzstd=enabled \
+	     -Dzlib=enabled \
+	     -Dshader-cache=enabled \
+	     -Dvalgrind=disabled \
+	     -Dlibunwind=disabled \
+	     -Dexpat=disabled \
+	     -Dxmlconfig=disabled \
+	     -Dvideo-codecs= \
+	     -Dbuild-tests=false
+
+    ${MESON} compile -C builddir
 }
 
 package() {
@@ -59,5 +158,4 @@ package() {
     cd mesa-$pkgver
 
     ${MESON} install -C builddir --destdir "${pkgdir}/${PS5_SYSROOT}"
-    ln -s libOSMesa.so "${pkgdir}/${PS5_SYSROOT}/${PS5_HBROOT}/lib/libGL.so"
 }

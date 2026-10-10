@@ -1,6 +1,6 @@
 pkgname=ps5-payload-glew
 pkgver=2.3.1
-pkgrel=1
+pkgrel=2
 pkgdesc="The OpenGL Extension Wrangler Library"
 arch=('any')
 url="https://github.com/nigels-com/glew"
@@ -18,7 +18,6 @@ prepare() {
     fi
 
     cd glew-$pkgver
-    sed -i 's|find_package (OpenGL REQUIRED)||g' build/cmake/CMakeLists.txt
 }
 
 build() {
@@ -26,7 +25,8 @@ build() {
     cd glew-$pkgver
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-	     -DGLEW_OSMESA=YES \
+	     -DGLEW_EGL=YES \
+	     -DGLEW_X11=NO \
 	     -DBUILD_UTILS=NO \
 	     -B builddir \
              -S build/cmake

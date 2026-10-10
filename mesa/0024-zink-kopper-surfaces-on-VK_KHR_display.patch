@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:23:33 +0000
+Subject: [PATCH] zink/kopper: surfaces on VK_KHR_display
+
+KOPPER_DISPLAY, a VK_KHR_display surface for platforms without a window
+system. The loader only names the drawable (struct
+kopper_display_surface_info); zink picks the first display at its native
+resolution, the highest refresh rate up to 60 Hz, and a plane that shows it,
+from its own physical device, which the loader does not have. zink enables
+VK_KHR_display when the driver has it. A display surface that cannot present
+without vsync falls back to FIFO.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ include/kopper_interface.h                | 10 +++
+ src/gallium/drivers/zink/zink_instance.py |  1 +
+ src/gallium/drivers/zink/zink_kopper.c    | 98 +++++++++++++++++++++++
+ src/gallium/drivers/zink/zink_kopper.h    |  3 +-
+ 4 files changed, 111 insertions(+), 1 deletion(-)
+
+diff --git a/include/kopper_interface.h b/include/kopper_interface.h
+index 7e3027713e9..acd33caf5ae 100644
+--- a/include/kopper_interface.h
++++ b/include/kopper_interface.h
+@@ -93,6 +93,16 @@ struct kopper_vk_surface_create_storage {
+    intptr_t padding[3];
+ };
+ 
++/* VK_KHR_display (sType VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR):
++ * the loader only names the drawable; zink picks the display, its mode and a
++ * plane from its own physical device, which the loader does not have.
++ */
++struct kopper_display_surface_info {
++   VkStructureType sType;
++   const void *pNext;
++   const void *key; /* identifies the drawable */
++};
++
+ struct kopper_loader_info {
+    struct kopper_vk_surface_create_storage bos;
+    int has_alpha;
+diff --git a/src/gallium/drivers/zink/zink_instance.py b/src/gallium/drivers/zink/zink_instance.py
+index 234d0ec02cd..332e881fe0b 100755
+--- a/src/gallium/drivers/zink/zink_instance.py
++++ b/src/gallium/drivers/zink/zink_instance.py
+@@ -48,6 +48,7 @@ EXTENSIONS = [
+     Extension("VK_KHR_wayland_surface"),
+     Extension("VK_KHR_xcb_surface"),
+     Extension("VK_KHR_win32_surface"),
++    Extension("VK_KHR_display"),
+     Extension("VK_EXT_swapchain_colorspace"),
+ ]
+ 
+diff --git a/src/gallium/drivers/zink/zink_kopper.c b/src/gallium/drivers/zink/zink_kopper.c
+index 950a89bf10b..657c625b57b 100644
+--- a/src/gallium/drivers/zink/zink_kopper.c
++++ b/src/gallium/drivers/zink/zink_kopper.c
+@@ -56,6 +56,9 @@ zink_kopper_set_present_mode_for_interval(struct kopper_displaytarget *cdt, int
+    } else if (interval > 0) {
+       cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    }
++   /* A display's surface may present in FIFO alone. */
++   if (cdt->type == KOPPER_DISPLAY && !(cdt->present_modes & BITFIELD_BIT(cdt->present_mode)))
++      cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    assert(cdt->present_modes & BITFIELD_BIT(cdt->present_mode));
+ #endif
+ }
+@@ -80,11 +83,91 @@ init_dt_type(struct kopper_displaytarget *cdt)
+       cdt->type = KOPPER_WIN32;
+       break;
+ #endif
++   case VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR:
++      cdt->type = KOPPER_DISPLAY;
++      break;
+    default:
+       UNREACHABLE("unsupported!");
+    }
+ }
+ 
++/* VK_KHR_display: the first display, in its native resolution at the highest
++ * refresh rate up to 60 Hz (higher modes can need the program to ask for
++ * them), on the first plane that can show it, opaque.
++ */
++static VkResult
++kopper_CreateDisplaySurface(struct zink_screen *screen, VkSurfaceKHR *surface)
++{
++   VkResult error;
++
++   if (!screen->instance_info->have_KHR_display)
++      return VK_ERROR_EXTENSION_NOT_PRESENT;
++
++   uint32_t count = 1;
++   VkDisplayPropertiesKHR display;
++   error = VKSCR(GetPhysicalDeviceDisplayPropertiesKHR)(screen->pdev, &count, &display);
++   if ((error != VK_SUCCESS && error != VK_INCOMPLETE) || !count)
++      return error != VK_SUCCESS ? error : VK_ERROR_INITIALIZATION_FAILED;
++
++   VkDisplayModePropertiesKHR modes[16];
++   count = ARRAY_SIZE(modes);
++   error = VKSCR(GetDisplayModePropertiesKHR)(screen->pdev, display.display, &count, modes);
++   if ((error != VK_SUCCESS && error != VK_INCOMPLETE) || !count)
++      return error != VK_SUCCESS ? error : VK_ERROR_INITIALIZATION_FAILED;
++   int best = -1;
++   for (unsigned i = 0; i < count; i++) {
++      const VkDisplayModeParametersKHR *p = &modes[i].parameters;
++      if (p->visibleRegion.width != display.physicalResolution.width ||
++          p->visibleRegion.height != display.physicalResolution.height || p->refreshRate > 60000)
++         continue;
++      if (best < 0 || p->refreshRate > modes[best].parameters.refreshRate)
++         best = i;
++   }
++   if (best < 0)
++      best = 0;
++
++   VkDisplayPlanePropertiesKHR planes[16];
++   count = ARRAY_SIZE(planes);
++   error = VKSCR(GetPhysicalDeviceDisplayPlanePropertiesKHR)(screen->pdev, &count, planes);
++   if ((error != VK_SUCCESS && error != VK_INCOMPLETE) || !count)
++      return error != VK_SUCCESS ? error : VK_ERROR_INITIALIZATION_FAILED;
++   int plane = -1;
++   for (unsigned i = 0; i < count && plane < 0; i++) {
++      if (planes[i].currentDisplay != VK_NULL_HANDLE && planes[i].currentDisplay != display.display)
++         continue;
++      VkDisplayKHR displays[16];
++      uint32_t display_count = ARRAY_SIZE(displays);
++      if (VKSCR(GetDisplayPlaneSupportedDisplaysKHR)(screen->pdev, i, &display_count, displays) < 0)
++         continue;
++      for (unsigned j = 0; j < display_count; j++) {
++         if (displays[j] == display.display)
++            plane = i;
++      }
++   }
++   if (plane < 0)
++      return VK_ERROR_INITIALIZATION_FAILED;
++
++   VkDisplayPlaneCapabilitiesKHR caps;
++   error = VKSCR(GetDisplayPlaneCapabilitiesKHR)(screen->pdev, modes[best].displayMode, plane, &caps);
++   if (error != VK_SUCCESS)
++      return error;
++   VkDisplayPlaneAlphaFlagBitsKHR alpha = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
++   if (!(caps.supportedAlpha & alpha))
++      alpha = (VkDisplayPlaneAlphaFlagBitsKHR)(caps.supportedAlpha & -caps.supportedAlpha);
++
++   const VkDisplaySurfaceCreateInfoKHR info = {
++      .sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR,
++      .displayMode = modes[best].displayMode,
++      .planeIndex = plane,
++      .planeStackIndex = planes[plane].currentStackIndex,
++      .transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
++      .globalAlpha = 1.0f,
++      .alphaMode = alpha,
++      .imageExtent = modes[best].parameters.visibleRegion,
++   };
++   return VKSCR(CreateDisplayPlaneSurfaceKHR)(screen->instance, &info, NULL, surface);
++}
++
+ static VkSurfaceKHR
+ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cdt)
+ {
+@@ -119,6 +202,9 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
+       break;
+    }
+ #endif
++   case VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR:
++      error = kopper_CreateDisplaySurface(screen, &surface);
++      break;
+    default:
+       UNREACHABLE("unsupported!");
+    }
+@@ -235,6 +321,11 @@ find_dt_entry(struct zink_screen *screen, const struct kopper_displaytarget *cdt
+       break;
+    }
+ #endif
++   case KOPPER_DISPLAY: {
++      const struct kopper_display_surface_info *display = (const void *)&cdt->info.bos;
++      he = _mesa_hash_table_search(&screen->dts, display->key);
++      break;
++   }
+    default:
+       UNREACHABLE("unsupported!");
+    }
+@@ -313,6 +404,7 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
+    switch (cdt->type) {
+    case KOPPER_X11:
+    case KOPPER_WIN32:
++   case KOPPER_DISPLAY: /* the display mode's size, in currentExtent */
+       /* With Xcb, minImageExtent, maxImageExtent, and currentExtent must always equal the window size.
+        * ...
+        * Due to above restrictions, it is only possible to create a new swapchain on this
+@@ -444,6 +536,7 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
+             break;
+          case KOPPER_WAYLAND:
+          case KOPPER_WIN32:
++         case KOPPER_DISPLAY:
+             _mesa_hash_table_init(&screen->dts, screen, _mesa_hash_pointer, _mesa_key_pointer_equal);
+             break;
+          default:
+@@ -516,6 +609,11 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
+       break;
+    }
+ #endif
++   case KOPPER_DISPLAY: {
++      const struct kopper_display_surface_info *display = (const void *)&cdt->info.bos;
++      _mesa_hash_table_insert(&screen->dts, display->key, cdt);
++      break;
++   }
+    default:
+       UNREACHABLE("unsupported!");
+    }
+diff --git a/src/gallium/drivers/zink/zink_kopper.h b/src/gallium/drivers/zink/zink_kopper.h
+index d1971ecb8b5..3d354e95888 100644
+--- a/src/gallium/drivers/zink/zink_kopper.h
++++ b/src/gallium/drivers/zink/zink_kopper.h
+@@ -74,7 +74,8 @@ struct kopper_swapchain {
+ enum kopper_type {
+    KOPPER_X11,
+    KOPPER_WAYLAND,
+-   KOPPER_WIN32
++   KOPPER_WIN32,
++   KOPPER_DISPLAY, /* VK_KHR_display: struct kopper_display_surface_info */
+ };
+ 
+ struct kopper_displaytarget

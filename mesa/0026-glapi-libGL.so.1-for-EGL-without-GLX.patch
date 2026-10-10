@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PS5 Mesa port <ps5-mesa@localhost>
+Date: Wed, 7 Oct 2026 19:31:06 +0000
+Subject: [PATCH] glapi: libGL.so.1 for EGL without GLX
+
+With -Dglx=disabled -Degl=enabled -Dopengl=true there was no library that
+exports the OpenGL API: a program could create an OpenGL context through EGL
+but had to fetch every function with eglGetProcAddress, and SDL, which
+dlopen()s libGL.so.1 (or libOpenGL.so.0) for an OpenGL context on EGL, could
+not create one.
+
+Build libGL.so.1 in that configuration (without glvnd): every function of
+Mesa's dispatch, each calling the current context's dispatch table through
+shared-glapi, as libGLESv2's entry points do; gl.pc names it. The four
+*IndirectCount functions, whose parameters Mesa's XML declares differently
+from <GL/glext.h>, are left out, as GLX's libGL leaves them out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014ZqjJDSiP9GQFUidfnxiHF
+---
+ src/mesa/glapi/opengl/gen_symbols.py | 32 +++++++++++++++++++
+ src/mesa/glapi/opengl/libgl_public.c | 19 +++++++++++
+ src/mesa/glapi/opengl/meson.build    | 48 ++++++++++++++++++++++++++++
+ src/meson.build                      |  4 +++
+ 4 files changed, 103 insertions(+)
+ create mode 100644 src/mesa/glapi/opengl/gen_symbols.py
+ create mode 100644 src/mesa/glapi/opengl/libgl_public.c
+ create mode 100644 src/mesa/glapi/opengl/meson.build
+
+diff --git a/src/mesa/glapi/opengl/gen_symbols.py b/src/mesa/glapi/opengl/gen_symbols.py
+new file mode 100644
+index 00000000000..cac797661c9
+--- /dev/null
++++ b/src/mesa/glapi/opengl/gen_symbols.py
+@@ -0,0 +1,32 @@
++# Copyright © 2026
++# SPDX-License-Identifier: MIT
++"""Print every function of a GLAPI XML file, one per line (gl<Name>), in the
++form mapi_abi.py --gl_symbols takes: the functions libGL without GLX exports.
++Entry points whose GLX protocol differs from the function they alias are left
++out, as they are from GLX's libGL (they are GLX's own), and so are the
++functions whose parameters Mesa's XML declares differently from <GL/glext.h>
++(GLX's libGL does not export them either); programs get those through
++eglGetProcAddress."""
++
++import os
++import sys
++
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'glapi', 'gen'))
++import gl_XML  # noqa: E402
++import glX_XML  # noqa: E402
++
++api = gl_XML.parse_GL_API(sys.argv[1], glX_XML.glx_item_factory())
++# The indirect buffer offset is a GLintptr in Mesa's XML, a const void * in
++# <GL/glext.h>.
++DIFFERENT_PROTOTYPE = {
++    'glMultiDrawArraysIndirectCount', 'glMultiDrawArraysIndirectCountARB',
++    'glMultiDrawElementsIndirectCount', 'glMultiDrawElementsIndirectCountARB',
++}
++
++names = set()
++for func in api.functionIterateByOffset():
++    for name in func.entry_points:
++        if not func.has_different_protocol(name):
++            names.add('gl' + name)
++for name in sorted(names - DIFFERENT_PROTOTYPE):
++    print(name)
+diff --git a/src/mesa/glapi/opengl/libgl_public.c b/src/mesa/glapi/opengl/libgl_public.c
+new file mode 100644
+index 00000000000..f61c69d6140
+--- /dev/null
++++ b/src/mesa/glapi/opengl/libgl_public.c
+@@ -0,0 +1,19 @@
++/* Copyright (C) 2010 LunarG Inc.
++ * SPDX-License-Identifier: MIT
++ *
++ * The OpenGL API's public entry points for libGL without GLX: each calls the
++ * current context's dispatch table, as libGLESv2's do (libgles2_public.c).
++ */
++
++#include "glapi/glapi_priv.h"
++
++#if defined(_GLAPI_ENTRY_ARCH_TLS_H)
++#include _GLAPI_ENTRY_ARCH_TLS_H
++#define MAPI_TMP_STUB_ASM_GCC_NO_HIDDEN
++#else
++/* C version of the public entries */
++#define MAPI_TMP_DEFINES
++#define MAPI_TMP_PUBLIC_ENTRIES_NO_HIDDEN
++#endif /* defined(_GLAPI_ENTRY_ARCH_TLS_H) */
++
++#include "gl_glapi_mapi_tmp.h"
+diff --git a/src/mesa/glapi/opengl/meson.build b/src/mesa/glapi/opengl/meson.build
+new file mode 100644
+index 00000000000..305153ca655
+--- /dev/null
++++ b/src/mesa/glapi/opengl/meson.build
+@@ -0,0 +1,48 @@
++# Copyright © 2026
++# SPDX-License-Identifier: MIT
++
++# libGL.so.1 without GLX, for EGL (-Dglx=disabled -Degl=enabled -Dopengl=true):
++# every OpenGL function, each dispatched through shared-glapi to the current
++# context as libGLESv2's are. A program links it (-lGL, pkg-config gl) or
++# dlopen()s it, as SDL does for an OpenGL context on EGL; window-system
++# functions come from EGL.
++
++libgl_egl_symbols = custom_target(
++  'libgl-egl-symbols.txt',
++  input : ['gen_symbols.py', '../glapi/gen/gl_and_es_API.xml'],
++  output : 'libgl-egl-symbols.txt',
++  command : [prog_python, '@INPUT0@', '@INPUT1@'],
++  depend_files : glapi_xml_py_deps,
++  capture : true,
++)
++
++gl_glapi_mapi_tmp_h = custom_target(
++  'gl_glapi_mapi_tmp.h',
++  input : ['../mapi_abi.py', '../glapi/gen/gl_and_es_API.xml', libgl_egl_symbols],
++  output : 'gl_glapi_mapi_tmp.h',
++  command : [prog_python, '@INPUT0@', '--printer', 'glapi', '--gl_symbols', '@INPUT2@', '@INPUT1@'],
++  depend_files : glapi_xml_py_deps,
++  capture : true,
++)
++
++libgl = shared_library(
++  'GL',
++  ['libgl_public.c', gl_glapi_mapi_tmp_h],
++  c_args : [c_msvc_compat_args, gcc_lto_quirk],
++  gnu_symbol_visibility : 'hidden',
++  link_args : [ld_args_gc_sections],
++  include_directories : [inc_mesa, inc_src, inc_include],
++  link_with : shared_glapi_lib,
++  dependencies : [dep_thread, dep_m, dep_dl, idep_mesautilc11],
++  soversion : '1',
++  version : '1.2.0',
++  install : true,
++)
++
++pkg.generate(
++  name : 'gl',
++  description : 'Mesa OpenGL Library',
++  version : meson.project_version(),
++  libraries : [libgl, ps5_sysmodule_libs],
++  libraries_private : gl_priv_libs,
++)
+diff --git a/src/meson.build b/src/meson.build
+index c36f44b1397..a6c6f8ea339 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -138,6 +138,10 @@ if with_gallium and (with_glx != 'disabled' or with_egl)
+   if with_gles2 and not with_glvnd
+     subdir('mesa/glapi/es2api')
+   endif
++  # OpenGL for EGL alone: libGL without GLX
++  if with_opengl and with_glx == 'disabled' and with_egl and not with_glvnd
++    subdir('mesa/glapi/opengl')
++  endif
+   if with_tests
+     subdir('mesa/main/tests')
+     subdir('mesa/state_tracker/tests')

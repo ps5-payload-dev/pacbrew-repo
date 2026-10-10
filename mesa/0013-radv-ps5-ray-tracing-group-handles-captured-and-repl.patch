@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:41 +0000
+Subject: [PATCH] radv/ps5: ray tracing group handles captured and replayed
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  6824f491209 Merge ps5-rt-replay: ray tracing group handles captured and replayed
+---
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 110 +++++++++++++++++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |   8 +-
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   |   8 +-
+ 3 files changed, 117 insertions(+), 9 deletions(-)
+
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 5dfab18c3bb..0f40c5988a9 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -204,6 +204,38 @@ radv_ps5_window_contains(uint64_t address, uint64_t bytes)
+ 
+ static int32_t radv_ps5_agc_result = -1;
+ 
++/* The top of the window, kept for the replayable window buffers (a ray tracing
++ * pipeline's shader arenas when group handles are captured): the kernel
++ * places every other window mapping, so an address captured among them may be
++ * taken when it is replayed. Here the port places them, captures from the top
++ * down and replays at their captured addresses; the range stays reserved
++ * where nothing is mapped. */
++#define RADV_PS5_WINDOW_REPLAY_BYTES (UINT64_C(256) << 20)
++#define RADV_PS5_WINDOW_REPLAY_BASE  (RADV_PS5_WINDOW_BASE + RADV_PS5_WINDOW_BYTES - RADV_PS5_WINDOW_REPLAY_BYTES)
++static struct radv_ps5_granules radv_ps5_window_replay;
++static bool radv_ps5_window_replay_ready;
++
++static void
++radv_ps5_window_replay_init(void)
++{
++   void *at = (void *)(uintptr_t)RADV_PS5_WINDOW_REPLAY_BASE;
++   if (sceKernelReserveVirtualRange(&at, RADV_PS5_WINDOW_REPLAY_BYTES, 0, RADV_PS5_LARGE_BYTES) != 0)
++      return;
++   if (at != (void *)(uintptr_t)RADV_PS5_WINDOW_REPLAY_BASE ||
++       !radv_ps5_granules_init(&radv_ps5_window_replay, RADV_PS5_WINDOW_REPLAY_BASE, RADV_PS5_WINDOW_REPLAY_BYTES,
++                               RADV_PS5_LARGE_BYTES)) {
++      sceKernelMunmap(at, RADV_PS5_WINDOW_REPLAY_BYTES);
++      return;
++   }
++   radv_ps5_window_replay_ready = true;
++}
++
++bool
++radv_ps5_window_replayable(void)
++{
++   return radv_ps5_window_replay_ready;
++}
++
+ static void
+ radv_ps5_platform_once(void)
+ {
+@@ -214,6 +246,8 @@ radv_ps5_platform_once(void)
+    radv_ps5_ready = radv_ps5_agc_result == 0 &&
+                     radv_ps5_granules_init(&radv_ps5_region, RADV_PS5_REGION_BASE, RADV_PS5_REGION_BYTES,
+                                            RADV_PS5_LARGE_BYTES);
++   if (radv_ps5_ready)
++      radv_ps5_window_replay_init();
+ }
+ 
+ bool
+@@ -305,9 +339,60 @@ radv_ps5_memory_alloc(uint64_t bytes, uint64_t alignment, bool window32, struct
+    return true;
+ }
+ 
++static bool radv_ps5_map_fixed(uint8_t *at, uint64_t bytes, int64_t physical);
++
++/* A replayable window buffer, in the window's replay range: captured from its
++ * top, replayed at the captured address. */
++static bool
++radv_ps5_memory_alloc_window_replay(uint64_t bytes, uint64_t alignment, uint64_t replay_va,
++                                    struct radv_ps5_memory *out)
++{
++   if (!radv_ps5_window_replay_ready)
++      return false;
++   alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
++   const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
++   uint32_t granule;
++   if (replay_va) {
++      if (replay_va < RADV_PS5_WINDOW_REPLAY_BASE || (replay_va - RADV_PS5_WINDOW_BASE) % alignment ||
++          !radv_ps5_window_contains(replay_va, (uint64_t)granules * RADV_PS5_LARGE_BYTES))
++         return false;
++      granule = (uint32_t)((replay_va - RADV_PS5_WINDOW_REPLAY_BASE) / RADV_PS5_LARGE_BYTES);
++      if (!radv_ps5_granules_take_at(&radv_ps5_window_replay, granule, granules))
++         return false;
++   } else {
++      granule = radv_ps5_granules_take_top(&radv_ps5_window_replay, granules,
++                                           (uint32_t)(alignment / RADV_PS5_LARGE_BYTES));
++      if (granule == UINT32_MAX)
++         return false;
++   }
++
++   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
++   uint8_t *const at = (uint8_t *)(uintptr_t)(RADV_PS5_WINDOW_REPLAY_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
++   int64_t physical = -1;
++   if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), span, RADV_PS5_LARGE_BYTES,
++                                     RADV_PS5_DIRECT_TYPE, &physical) != 0) {
++      radv_ps5_granules_give(&radv_ps5_window_replay, granule, granules);
++      return false;
++   }
++   if (!radv_ps5_map_fixed(at, span, physical)) {
++      sceKernelReleaseDirectMemory(physical, span);
++      radv_ps5_granules_give(&radv_ps5_window_replay, granule, granules);
++      return false;
++   }
++   *out = (struct radv_ps5_memory){
++      .cpu = at,
++      .bytes = span,
++      .physical = physical,
++      .granule = granule,
++      .granules = granules,
++      .window_replay = true,
++   };
++   return true;
++}
++
+ /* A window buffer is replayed where the kernel agrees to put it: at the
+  * captured address given as a hint, if nothing took it since. */
+-static bool
++static UNUSED bool
+ radv_ps5_memory_replay_window(uint64_t bytes, uint64_t alignment, uint64_t replay_va, struct radv_ps5_memory *out)
+ {
+    alignment = util_next_power_of_two64(MAX2(alignment, PS5_KERNEL_DIRECT_ALIGNMENT));
+@@ -334,12 +419,10 @@ bool
+ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window32, uint64_t replay_va,
+                                  struct radv_ps5_memory *out)
+ {
+-   if (window32 && !replay_va)
+-      return radv_ps5_memory_alloc(bytes, alignment, true, out);
+    *out = (struct radv_ps5_memory){.physical = -1};
+    bytes = align64(MAX2(bytes, 1), RADV_PS5_PAGE_BYTES);
+    if (window32)
+-      return radv_ps5_memory_replay_window(bytes, alignment, replay_va, out);
++      return radv_ps5_memory_alloc_window_replay(bytes, alignment, replay_va, out);
+    alignment = util_next_power_of_two64(MAX2(alignment, RADV_PS5_LARGE_BYTES));
+    const uint32_t granules = (uint32_t)DIV_ROUND_UP(bytes, RADV_PS5_LARGE_BYTES);
+    const uint32_t align_granules = (uint32_t)(alignment / RADV_PS5_LARGE_BYTES);
+@@ -531,6 +614,18 @@ radv_ps5_memory_free(struct radv_ps5_memory *memory)
+ {
+    if (!memory->cpu)
+       return;
++   if (memory->window_replay) {
++      /* Back to a reservation, for the next capture or replay. */
++      void *at = memory->cpu;
++      if (sceKernelReserveVirtualRange(&at, memory->bytes, PS5_KERNEL_MAP_FIXED, RADV_PS5_PAGE_BYTES) != 0 ||
++          at != memory->cpu)
++         fprintf(stderr, "radv/ps5: the window's replay range at %p could not be reserved again\n",
++                 (void *)memory->cpu);
++      radv_ps5_granules_give(&radv_ps5_window_replay, memory->granule, memory->granules);
++      sceKernelReleaseDirectMemory(memory->physical, memory->bytes);
++      *memory = (struct radv_ps5_memory){.physical = -1};
++      return;
++   }
+    const int32_t unmapped = sceKernelMunmap(memory->cpu, memory->bytes);
+    if (unmapped != 0)
+       fprintf(stderr, "radv/ps5: sceKernelMunmap(%p, %" PRIu64 ") failed: 0x%08x\n", (void *)memory->cpu,
+@@ -739,6 +834,13 @@ radv_ps5_memory_alloc_replayable(uint64_t bytes, uint64_t alignment, bool window
+    return true;
+ }
+ 
++/* The model places every window buffer itself (radv_ps5_window). */
++bool
++radv_ps5_window_replayable(void)
++{
++   return true;
++}
++
+ bool
+ radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
+ {
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 8884ca013a1..1702bc473d7 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -43,15 +43,21 @@ struct radv_ps5_memory {
+    uint64_t bytes;
+    /* The direct-memory allocation behind it; -1 on the host. */
+    int64_t physical;
+-   /* The device-memory region granules the mapping took, if any. */
++   /* The device-memory region granules the mapping took, if any, or the
++    * window's replay range's (window_replay). */
+    uint32_t granule;
+    uint32_t granules;
++   bool window_replay;
+ };
+ 
+ /* Initialises AGC once per process. It has to run from the title's own
+  * executable, which the driver archive is linked into. */
+ bool radv_ps5_platform_init(void);
+ 
++/* Whether a replayable window buffer can be placed at its captured address
++ * again, whatever else the process mapped since (radv_ps5_memory_alloc_replayable). */
++bool radv_ps5_window_replayable(void);
++
+ /* Whether submitted words run on a GPU. The host model completes a submission
+  * without running it. */
+ bool radv_ps5_platform_runs_gpu(void);
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index bb07cd380d3..6319a3398d8 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -374,11 +374,11 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * (radv_ps5_memory_alloc_replayable); before that, every replay case of
+     * dEQP-VK.binding_model.buffer_device_address (723) failed. Outside the
+     * shaders' window captures keep clear of every other buffer; in it the
+-    * kernel places buffers, so a replay there holds only if nothing took the
+-    * address since, which the ray tracing pipelines' shader handles (whole
+-    * shader arenas) cannot count on. */
++    * kernel places buffers, so replayable ones (the ray tracing pipelines'
++    * shader arenas, whose group handles are captured) go in a range at its
++    * top the port keeps for them (radv_ps5_window_replayable). */
+    info->has_replayable_va = true;
+-   info->has_replayable_va_32bit = false;
++   info->has_replayable_va_32bit = radv_ps5_window_replayable();
+    info->has_vm_always_valid = true;
+    /* buffer_from_ptr gives the application's host memory GPU access, which the
+     * GPU reaches at the CPU's address (HARDWARE_FINDINGS.md, 2026-09-27). */

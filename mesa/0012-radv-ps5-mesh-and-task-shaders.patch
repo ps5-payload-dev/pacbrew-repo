@@ -1,0 +1,2621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:41 +0000
+Subject: [PATCH] radv/ps5: mesh and task shaders
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  528835a404e Merge ps5-mesh: mesh shaders without per-primitive parameters
+  07e90fd6666 Merge ps5-mesh: mesh shaders alone stay behind RADV_PS5_MESH
+  bc9eedba6b1 Merge ps5-task: task shaders on the graphics ring, and with them VK_EXT_mesh_shader
+---
+ src/amd/common/ac_gpu_info.c                |   2 +
+ src/amd/common/ac_gpu_info.h                |  10 +
+ src/amd/common/nir/ac_nir.h                 |  19 +
+ src/amd/common/nir/ac_nir_lower_ngg_mesh.c  | 445 +++++++++++++++++-
+ src/amd/vulkan/meson.build                  |   1 +
+ src/amd/vulkan/meta/radv_meta.h             |   9 +
+ src/amd/vulkan/meta/radv_meta_mesh_draw.c   | 151 ++++++
+ src/amd/vulkan/nir/radv_meta_nir.c          | 203 ++++++++
+ src/amd/vulkan/nir/radv_meta_nir.h          |   2 +
+ src/amd/vulkan/nir/radv_nir.h               |   3 +
+ src/amd/vulkan/nir/radv_nir_lower_abi.c     | 153 ++++++
+ src/amd/vulkan/radv_cmd_buffer.c            | 488 ++++++++++++++++++--
+ src/amd/vulkan/radv_constants.h             |  12 +
+ src/amd/vulkan/radv_device.c                |  41 ++
+ src/amd/vulkan/radv_device.h                |   9 +
+ src/amd/vulkan/radv_gs_compute.c            |   9 +-
+ src/amd/vulkan/radv_physical_device.c       |  40 +-
+ src/amd/vulkan/radv_physical_device.h       |  19 +
+ src/amd/vulkan/radv_pipeline.c              |   4 +
+ src/amd/vulkan/radv_shader.c                |   2 +
+ src/amd/vulkan/radv_shader.h                |  48 +-
+ src/amd/vulkan/radv_shader_args.c           |  19 +-
+ src/amd/vulkan/radv_shader_args.h           |   8 +
+ src/amd/vulkan/radv_shader_info.c           |  69 ++-
+ src/amd/vulkan/radv_shader_info.h           |  21 +
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c |   6 +
+ src/compiler/nir/nir_divergence_analysis.c  |   3 +
+ src/compiler/nir/nir_intrinsics.py          |   6 +
+ 28 files changed, 1741 insertions(+), 61 deletions(-)
+ create mode 100644 src/amd/vulkan/meta/radv_meta_mesh_draw.c
+
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index 467deca3144..c8f032cf040 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -1068,6 +1068,7 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
+    info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
+    info->has_legacy_gs = info->gfx_level < GFX11;
+    info->has_gpu_written_ibs = true;
++   info->has_dispatch_mesh_indirect = info->gfx_level >= GFX10_3;
+    info->has_perf_counters = true;
+    info->has_ps_strict_vertex_order = info->gfx_level >= GFX10_3;
+    info->has_vrs = info->gfx_level >= GFX10_3;
+@@ -2076,6 +2077,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
+    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
+    fprintf(f, "    has_legacy_gs = %i\n", info->has_legacy_gs);
+    fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
++   fprintf(f, "    has_dispatch_mesh_indirect = %i\n", info->has_dispatch_mesh_indirect);
+    fprintf(f, "    has_perf_counters = %i\n", info->has_perf_counters);
+    fprintf(f, "    has_ps_strict_vertex_order = %i\n", info->has_ps_strict_vertex_order);
+    fprintf(f, "    has_vrs = %i\n", info->has_vrs);
+diff --git a/src/amd/common/ac_gpu_info.h b/src/amd/common/ac_gpu_info.h
+index a02d7f693ea..50f0a3434e7 100644
+--- a/src/amd/common/ac_gpu_info.h
++++ b/src/amd/common/ac_gpu_info.h
+@@ -299,6 +299,7 @@ struct radeon_info {
+    bool has_vrs_ds_export_bug;
+    bool has_vrs_export_bug;
+    bool has_taskmesh_indirect0_bug;
++   bool has_dispatch_mesh_indirect; /* DISPATCH_MESH_INDIRECT_MULTI */
+    bool sdma_supports_sparse;      /* Whether SDMA can safely access sparse resources. */
+    bool sdma_supports_compression; /* Whether SDMA supports DCC and HTILE. */
+    bool has_set_context_pairs;
+@@ -627,6 +628,15 @@ uint32_t ac_gfx103_get_cu_mask_ps(const struct radeon_info *info);
+  */
+ #define AC_MESH_SCRATCH_ENTRY_BYTES (160 * 1024)
+ 
++/* The ring a mesh shader exporting its primitives in parts publishes its
++ * outputs in (ac_nir_lower_ngg_options.ms_publish): a header dword per slot,
++ * then the slots, as many as fit, AC_MS_PUBLISH_MAX_SLOTS at most. Zeroed
++ * when created; each draw packet leaves it zeroed.
++ */
++#define AC_MS_PUBLISH_RING_BYTES (16 * 1024 * 1024)
++#define AC_MS_PUBLISH_MAX_SLOTS 256
++#define AC_MS_PUBLISH_HEADER_BYTES (AC_MS_PUBLISH_MAX_SLOTS * 4)
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/amd/common/nir/ac_nir.h b/src/amd/common/nir/ac_nir.h
+index e87e34c3860..a9fbd5f2433 100644
+--- a/src/amd/common/nir/ac_nir.h
++++ b/src/amd/common/nir/ac_nir.h
+@@ -247,6 +247,25 @@ typedef struct {
+ 
+    /* MS */
+    bool multiview;
++   /* Without per-primitive parameters (GFX10.1's parameter cache), a mesh
++    * shader gives each primitive vertices of its own, which carry its
++    * per-primitive outputs as per-vertex ones, flat. As one NGG subgroup
++    * exports 256 vertices at most, a workgroup's primitives go out in
++    * ms_prim_parts parts (hardware workgroup index = API index * parts +
++    * part). Without ms_publish, the API workgroup runs once per part, its
++    * side effects in the first part only. 0 exports per-primitive parameters.
++    */
++   unsigned ms_prim_parts;
++   /* With more than one part: the first part runs the API workgroup and
++    * publishes its outputs in a slot of the ring at ms_publish_ring_amd
++    * (AC_MS_PUBLISH_RING_BYTES), which the other parts wait for, export from
++    * and free. Workgroups take slots in launch order, counted from the draw
++    * packet's first (ms_publish_first_workgroup_amd, ms_publish_workgroups_amd),
++    * and wait only for earlier ones, which the hardware launched first. The
++    * packet's last workgroups leave the ring zeroed; the next packet must not
++    * start before they end.
++    */
++   bool ms_publish;
+ } ac_nir_lower_ngg_options;
+ 
+ bool
+diff --git a/src/amd/common/nir/ac_nir_lower_ngg_mesh.c b/src/amd/common/nir/ac_nir_lower_ngg_mesh.c
+index ef332e872c5..1809ccb1538 100644
+--- a/src/amd/common/nir/ac_nir_lower_ngg_mesh.c
++++ b/src/amd/common/nir/ac_nir_lower_ngg_mesh.c
+@@ -122,8 +122,36 @@ typedef struct
+ 
+    const uint8_t *vs_output_param_offset;
+    bool has_param_exports;
++
++   /* ac_nir_lower_ngg_options.ms_prim_parts, the primitives of a part, and
++    * the part this hardware workgroup exports. */
++   unsigned prim_parts;
++   unsigned part_prims;
++   nir_def *part;
++
++   /* ac_nir_lower_ngg_options.ms_publish: the first part runs the API
++    * workgroup and publishes its outputs in a slot of the ring, which the
++    * other parts copy back from. A slot holds the output counts, the LDS
++    * outputs (from lds.vtx_attr.addr on) and the outputs the scratch ring
++    * would hold. Its header counts the slot's turns: turn t is free at
++    * t * parts, published at t * parts + 1, and each later part adds one when
++    * it is done with it, which frees it for turn t + 1.
++    */
++   bool publish;
++   unsigned publish_slots;
++   unsigned slot_bytes;
++   unsigned slot_lds_bytes;
++   unsigned slot_scratch_offset;
++   nir_def *header_addr;
++   nir_def *slot_addr;
++   nir_def *free_value;
++   /* No later workgroup of the draw packet takes this slot. */
++   nir_def *last_turn;
+ } lower_ngg_ms_state;
+ 
++/* A published slot: the counts, then the LDS outputs, then the scratch ones. */
++#define MS_PUBLISH_COUNTS_BYTES 16
++
+ static void
+ ms_store_prim_indices(nir_builder *b,
+                       nir_intrinsic_instr *intrin,
+@@ -314,6 +342,11 @@ ms_store_arrayed_output(nir_builder *b,
+       nir_store_shared(b, store_val, addr, .base = const_off,
+                      .write_mask = write_mask, .align_mul = 16,
+                      .align_offset = const_off % 16);
++   } else if (out_mode == ms_out_mode_scratch_ring && s->publish) {
++      nir_def *offset = nir_iadd_imm(b, addr, s->slot_scratch_offset + const_off);
++      nir_build_store_global(b, store_val, nir_iadd(b, s->slot_addr, nir_u2u64(b, offset)),
++                             .write_mask = write_mask, .align_mul = 16, .align_offset = const_off % 16,
++                             .access = ACCESS_COHERENT);
+    } else if (out_mode == ms_out_mode_scratch_ring) {
+       nir_def *ring = nir_load_ring_mesh_scratch_amd(b);
+       nir_def *off = nir_load_ring_mesh_scratch_offset_amd(b);
+@@ -421,6 +454,11 @@ ms_load_arrayed_output(nir_builder *b,
+       return nir_load_shared(b, num_components, load_bit_size, addr, .align_mul = 16,
+                              .align_offset = (component_offset * 4) % 16,
+                              .base = const_off);
++   } else if (out_mode == ms_out_mode_scratch_ring && s->publish) {
++      nir_def *offset = nir_iadd_imm(b, addr, s->slot_scratch_offset + const_off);
++      return nir_build_load_global(b, num_components, load_bit_size,
++                                   nir_iadd(b, s->slot_addr, nir_u2u64(b, offset)), .align_mul = 16,
++                                   .align_offset = const_off % 16, .access = ACCESS_COHERENT);
+    } else if (out_mode == ms_out_mode_scratch_ring) {
+       nir_def *ring = nir_load_ring_mesh_scratch_amd(b);
+       nir_def *off = nir_load_ring_mesh_scratch_offset_amd(b);
+@@ -485,7 +523,7 @@ update_ms_barrier(nir_builder *b,
+     */
+    unsigned mem_modes = nir_intrinsic_memory_modes(intrin);
+    if (mem_modes & nir_var_shader_out)
+-      mem_modes |= nir_var_mem_shared;
++      mem_modes |= nir_var_mem_shared | (s->publish ? nir_var_mem_global : 0);
+    else
+       return NULL;
+ 
+@@ -588,14 +626,29 @@ ms_create_same_invocation_vars(nir_builder *b, lower_ngg_ms_state *s)
+    }
+ }
+ 
++/* The launch index of this hardware workgroup: the API workgroup's, and the
++ * part of its primitives it exports. */
++static void
++ms_set_workgroup_index(nir_builder *b, nir_def *launch_index, lower_ngg_ms_state *s)
++{
++   if (s->prim_parts > 1) {
++      s->workgroup_index = nir_udiv_imm(b, launch_index, s->prim_parts);
++      s->part = nir_umod_imm(b, launch_index, s->prim_parts);
++   } else {
++      s->workgroup_index = launch_index;
++   }
++}
++
+ static void
+ ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
+ {
+    /* Workgroup ID should have been lowered to workgroup index. */
+    assert(!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_ID));
+ 
+-   /* No need to do anything if the shader doesn't use the workgroup index. */
+-   if (!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_INDEX))
++   /* No need to do anything if the shader doesn't use the workgroup index
++    * and exports its primitives at once. */
++   if (!BITSET_TEST(b->shader->info.system_values_read, SYSTEM_VALUE_WORKGROUP_INDEX) &&
++       s->prim_parts <= 1)
+       return;
+ 
+    b->cursor = nir_before_impl(b->impl);
+@@ -611,9 +664,9 @@ ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
+     */
+    nir_def *workgroup_index = nir_load_vertex_id_zero_base(b);
+ 
+-   if (s->api_workgroup_size <= s->wave_size) {
++   if (s->api_workgroup_size <= s->wave_size && s->hw_workgroup_size <= s->wave_size) {
+       /* API workgroup is small, so we don't need to use LDS. */
+-      s->workgroup_index = nir_read_first_invocation(b, workgroup_index);
++      ms_set_workgroup_index(b, nir_read_first_invocation(b, workgroup_index), s);
+       return;
+    }
+ 
+@@ -650,7 +703,25 @@ ms_emit_legacy_workgroup_index(nir_builder *b, lower_ngg_ms_state *s)
+    nir_pop_if(b, if_elected);
+ 
+    workgroup_index = nir_if_phi(b, workgroup_index, dont_care);
+-   s->workgroup_index = nir_read_first_invocation(b, workgroup_index);
++   ms_set_workgroup_index(b, nir_read_first_invocation(b, workgroup_index), s);
++}
++
++/* This part's primitives of num_prm: at most part_prims from its first. */
++static nir_def *
++ms_part_prims(nir_builder *b, nir_def *num_prm, lower_ngg_ms_state *s)
++{
++   nir_def *first = nir_imul_imm(b, s->part, s->part_prims);
++   return nir_umin(b, nir_usub_sat(b, num_prm, first), nir_imm_int(b, s->part_prims));
++}
++
++static void
++ms_alloc_vertices_and_primitives(nir_builder *b, nir_def *num_vtx, nir_def *num_prm, lower_ngg_ms_state *s)
++{
++   if (s->prim_parts) {
++      num_prm = ms_part_prims(b, num_prm, s);
++      num_vtx = nir_imul_imm(b, num_prm, s->vertices_per_prim);
++   }
++   ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
+ }
+ 
+ static void
+@@ -673,7 +744,7 @@ set_ms_final_output_counts(nir_builder *b,
+ 
+    if (s->hw_workgroup_size <= s->wave_size) {
+       /* Single-wave mesh shader workgroup. */
+-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
++      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
+       return;
+    }
+ 
+@@ -691,7 +762,7 @@ set_ms_final_output_counts(nir_builder *b,
+        * allocating space for vertices/primitives.
+        */
+       nir_if *if_wave_0 = nir_push_if(b, nir_ieq_imm(b, nir_load_subgroup_id(b), 0));
+-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
++      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
+       nir_pop_if(b, if_wave_0);
+       return;
+    }
+@@ -716,7 +787,7 @@ set_ms_final_output_counts(nir_builder *b,
+                             .memory_semantics = NIR_MEMORY_ACQ_REL,
+                             .memory_modes = nir_var_mem_shared);
+ 
+-      ac_nir_ngg_alloc_vertices_and_primitives(b, num_vtx, num_prm, false);
++      ms_alloc_vertices_and_primitives(b, num_vtx, num_prm, s);
+    }
+    nir_push_else(b, if_wave_0);
+    {
+@@ -1008,6 +1079,234 @@ emit_ms_outputs(nir_builder *b, nir_def *invocation_index, nir_def *row_start,
+    }
+ }
+ 
++/* ac_nir_lower_ngg_options.ms_prim_parts: hardware vertex i of this part is
++ * corner i % vertices_per_prim of its primitive i / vertices_per_prim, with
++ * that API vertex's per-vertex outputs and the primitive's per-primitive
++ * ones; hardware primitive i is the part's primitive i, its own vertices.
++ */
++static void
++emit_ms_part_outputs(nir_builder *b, nir_def *invocation_index, nir_def *num_vtx, nir_def *num_prm,
++                     uint64_t per_vertex_outputs, uint64_t per_primitive_outputs, lower_ngg_ms_state *s)
++{
++   const unsigned vpp = s->vertices_per_prim;
++   nir_def *part_first = nir_imul_imm(b, s->part, s->part_prims);
++   nir_def *hw_prims = ms_part_prims(b, num_prm, s);
++   nir_def *hw_vertices = nir_imul_imm(b, hw_prims, vpp);
++
++   /* Layer and viewport go with the position, per vertex now, and so does
++    * the layer that multiview inserts.
++    */
++   const uint64_t prim_pos_outputs = (per_primitive_outputs & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)) |
++                                     (s->insert_layer_output ? VARYING_BIT_LAYER : 0);
++
++   nir_if *if_vertex = nir_push_if(b, nir_ult(b, invocation_index, hw_vertices));
++   {
++      nir_def *prim = nir_iadd(b, part_first, nir_udiv_imm(b, invocation_index, vpp));
++      nir_def *corner = nir_umod_imm(b, invocation_index, vpp);
++      nir_def *index_addr = nir_iadd(b, nir_imul_imm(b, prim, vpp), corner);
++      nir_def *vertex = nir_u2u32(b, nir_load_shared(b, 1, 8, index_addr, .base = s->layout.lds.indices_addr));
++      vertex = nir_umin(b, vertex, nir_iadd_imm(b, num_vtx, -1u));
++
++      ms_emit_arrayed_outputs(b, vertex, per_vertex_outputs, s);
++      ms_emit_arrayed_outputs(b, prim, per_primitive_outputs, s);
++      if (s->insert_layer_output) {
++         s->out.outputs[VARYING_SLOT_LAYER][0] = nir_load_view_index(b);
++         s->out.infos[VARYING_SLOT_LAYER].as_sysval_mask |= 1;
++      }
++
++      ac_nir_export_position(b, s->ac->gfx_level, s->options->export_clipdist_mask, false, false,
++                             !s->has_param_exports, false,
++                             s->per_vertex_outputs | VARYING_BIT_POS | prim_pos_outputs, &s->out, NULL);
++      if (s->has_param_exports)
++         ac_nir_export_parameters(b, s->vs_output_param_offset, per_vertex_outputs | per_primitive_outputs, 0,
++                                  &s->out);
++   }
++   nir_pop_if(b, if_vertex);
++
++   nir_if *if_primitive = nir_push_if(b, nir_ult(b, invocation_index, hw_prims));
++   {
++      nir_def *prim = nir_iadd(b, part_first, invocation_index);
++      nir_def *cull_flag = NULL;
++      if (s->uses_cull_flags) {
++         nir_def *flag = nir_load_shared(b, 1, 8, nir_imul_imm(b, prim, vpp), .base = s->layout.lds.cull_flags_addr);
++         cull_flag = nir_i2b(b, nir_u2u32(b, flag));
++      }
++      nir_def *indices[3];
++      for (unsigned c = 0; c < vpp; ++c)
++         indices[c] = nir_iadd_imm(b, nir_imul_imm(b, invocation_index, vpp), c);
++      ac_nir_export_primitive(b, ac_nir_pack_ngg_prim_exp_arg(b, vpp, indices, cull_flag, s->ac->gfx_level), NULL);
++   }
++   nir_pop_if(b, if_primitive);
++}
++
++/* ac_nir_lower_ngg_options.ms_publish: this API workgroup's slot, from its
++ * place among the draw packet's workgroups. Workgroups take slots in launch
++ * order, and a workgroup only ever waits for earlier ones.
++ */
++static void
++ms_publish_find_slot(nir_builder *b, lower_ngg_ms_state *s)
++{
++   nir_def *workgroup = nir_iadd(b, nir_load_ms_publish_first_workgroup_amd(b), nir_u2u64(b, s->workgroup_index));
++   nir_def *ring = nir_load_ms_publish_ring_amd(b);
++
++   nir_def *slot = nir_u2u32(b, nir_iand_imm(b, workgroup, s->publish_slots - 1));
++   nir_def *turn = nir_u2u32(b, nir_ushr_imm(b, workgroup, util_logbase2(s->publish_slots)));
++
++   /* The header wraps at 32 bits, and every comparison with it is a
++    * difference, so the turn's low 32 bits are enough.
++    */
++   s->free_value = nir_imul_imm(b, turn, s->prim_parts);
++   s->last_turn = nir_uge(b, nir_imm_int64(b, s->publish_slots),
++                          nir_isub(b, nir_load_ms_publish_workgroups_amd(b), workgroup));
++   s->header_addr = nir_iadd(b, ring, nir_u2u64(b, nir_imul_imm(b, slot, 4)));
++   s->slot_addr = nir_iadd(b, ring, nir_u2u64(b, nir_iadd_imm(b, nir_imul_imm(b, slot, s->slot_bytes),
++                                                             AC_MS_PUBLISH_HEADER_BYTES)));
++}
++
++/* The workgroup's first invocation waits until the slot's header is within
++ * count of first; then the workgroup goes on, reading what the header's
++ * writer wrote.
++ */
++static void
++ms_publish_wait(nir_builder *b, nir_def *first, unsigned count, lower_ngg_ms_state *s)
++{
++   nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
++   {
++      nir_loop *loop = nir_push_loop(b);
++      {
++         nir_def *header = nir_build_load_global(b, 1, 32, s->header_addr, .align_mul = 4,
++                                                 .access = ACCESS_COHERENT | ACCESS_VOLATILE);
++         nir_break_if(b, nir_ult_imm(b, nir_isub(b, header, first), count));
++         ac_nir_sleep(b, 64);
++      }
++      nir_pop_loop(b, loop);
++   }
++   nir_pop_if(b, if_first);
++
++   nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
++               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global | nir_var_mem_shared);
++}
++
++/* The LDS outputs to the slot or back, 16 bytes an invocation at a time. */
++static void
++ms_publish_copy_lds(nir_builder *b, bool to_slot, lower_ngg_ms_state *s)
++{
++   const unsigned chunks = s->slot_lds_bytes / 16;
++   if (!chunks)
++      return;
++
++   nir_variable *chunk_var = nir_local_variable_create(b->impl, glsl_uint_type(), "ms_publish_chunk");
++   nir_store_var(b, chunk_var, nir_load_local_invocation_index(b), 0x1);
++
++   nir_loop *loop = nir_push_loop(b);
++   {
++      nir_def *chunk = nir_load_var(b, chunk_var);
++      nir_break_if(b, nir_uge_imm(b, chunk, chunks));
++
++      nir_def *lds_offset = nir_imul_imm(b, chunk, 16);
++      nir_def *addr = nir_iadd(b, s->slot_addr, nir_u2u64(b, nir_iadd_imm(b, lds_offset, MS_PUBLISH_COUNTS_BYTES)));
++      if (to_slot) {
++         nir_def *data = nir_load_shared(b, 4, 32, lds_offset, .base = s->layout.lds.vtx_attr.addr, .align_mul = 16);
++         nir_build_store_global(b, data, addr, .align_mul = 16, .access = ACCESS_COHERENT);
++      } else {
++         nir_def *data = nir_build_load_global(b, 4, 32, addr, .align_mul = 16, .access = ACCESS_COHERENT);
++         nir_store_shared(b, data, lds_offset, .base = s->layout.lds.vtx_attr.addr, .align_mul = 16);
++      }
++
++      nir_store_var(b, chunk_var, nir_iadd_imm(b, chunk, s->hw_workgroup_size), 0x1);
++   }
++   nir_pop_loop(b, loop);
++}
++
++/* After the API workgroup: the first part publishes its outputs, the others
++ * wait for them and take them as their own.
++ */
++static void
++ms_publish_outputs(nir_builder *b, lower_ngg_ms_state *s)
++{
++   nir_if *if_first_part = nir_push_if(b, nir_ieq_imm(b, s->part, 0));
++   {
++      ms_publish_copy_lds(b, true, s);
++
++      /* The first invocation has the counts, whether or not they are uniform. */
++      nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
++      {
++         nir_def *counts = nir_vec2(b, nir_load_var(b, s->primitive_count_var), nir_load_var(b, s->vertex_count_var));
++         nir_build_store_global(b, counts, s->slot_addr, .align_mul = 16, .access = ACCESS_COHERENT);
++      }
++      nir_pop_if(b, if_first);
++
++      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
++                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global);
++
++      if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
++      {
++         nir_global_atomic(b, 32, s->header_addr, nir_iadd_imm(b, s->free_value, 1),
++                           .atomic_op = nir_atomic_op_xchg);
++      }
++      nir_pop_if(b, if_first);
++   }
++   nir_push_else(b, if_first_part);
++   {
++      ms_publish_wait(b, nir_iadd_imm(b, s->free_value, 1), s->prim_parts - 1, s);
++      ms_publish_copy_lds(b, false, s);
++
++      nir_def *counts = nir_build_load_global(b, 2, 32, s->slot_addr, .align_mul = 16, .access = ACCESS_COHERENT);
++      nir_store_var(b, s->primitive_count_var, nir_read_first_invocation(b, nir_channel(b, counts, 0)), 0x1);
++      nir_store_var(b, s->vertex_count_var, nir_read_first_invocation(b, nir_channel(b, counts, 1)), 0x1);
++
++      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
++                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
++   }
++   nir_pop_if(b, if_first_part);
++}
++
++/* A later part done with the slot adds one to its header. The last one frees
++ * the slot for its next turn, or, when no later workgroup of the packet takes
++ * it, zeroes it for the next packet.
++ */
++static void
++ms_publish_release(nir_builder *b, lower_ngg_ms_state *s)
++{
++   nir_if *if_later_part = nir_push_if(b, nir_ine_imm(b, s->part, 0));
++   {
++      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
++                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_global);
++
++      nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
++      {
++         nir_def *header = nir_global_atomic(b, 32, s->header_addr, nir_imm_int(b, 1), .atomic_op = nir_atomic_op_iadd);
++         nir_def *last_reader = nir_ieq(b, header, nir_iadd_imm(b, s->free_value, s->prim_parts - 1));
++         nir_if *if_zero = nir_push_if(b, nir_iand(b, last_reader, s->last_turn));
++         {
++            nir_global_atomic(b, 32, s->header_addr, nir_imm_int(b, 0), .atomic_op = nir_atomic_op_xchg);
++         }
++         nir_pop_if(b, if_zero);
++      }
++      nir_pop_if(b, if_first);
++   }
++   nir_pop_if(b, if_later_part);
++}
++
++/* The API workgroup runs in the first part only, once it has the slot. */
++static void
++ms_publish_first_part_runs(nir_builder *b, lower_ngg_ms_state *s)
++{
++   nir_cf_list body;
++   nir_cf_extract(&body, b->cursor, nir_after_impl(b->impl));
++   b->cursor = nir_after_impl(b->impl);
++
++   ms_publish_find_slot(b, s);
++
++   nir_if *if_first_part = nir_push_if(b, nir_ieq_imm(b, s->part, 0));
++   {
++      ms_publish_wait(b, s->free_value, 1, s);
++      nir_cf_reinsert(&body, b->cursor);
++      b->cursor = nir_after_cf_list(&if_first_part->then_list);
++   }
++   nir_pop_if(b, if_first_part);
++}
++
+ static void
+ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
+ {
+@@ -1016,7 +1315,11 @@ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
+    b->cursor = nir_after_block(last_block);
+ 
+    nir_barrier(b, .execution_scope=SCOPE_WORKGROUP, .memory_scope=SCOPE_WORKGROUP,
+-                         .memory_semantics=NIR_MEMORY_ACQ_REL, .memory_modes=nir_var_shader_out|nir_var_mem_shared);
++                         .memory_semantics=NIR_MEMORY_ACQ_REL,
++                         .memory_modes=nir_var_shader_out|nir_var_mem_shared|(s->publish ? nir_var_mem_global : 0));
++
++   if (s->publish)
++      ms_publish_outputs(b, s);
+ 
+    nir_def *num_prm;
+    nir_def *num_vtx;
+@@ -1051,6 +1354,14 @@ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
+       per_primitive_outputs |= VARYING_BIT_LAYER;
+    }
+ 
++   if (s->prim_parts) {
++      emit_ms_part_outputs(b, invocation_index, num_vtx, num_prm, per_vertex_outputs,
++                           s->per_primitive_outputs & ~SPECIAL_MS_OUT_MASK, s);
++      if (s->publish)
++         ms_publish_release(b, s);
++      return;
++   }
++
+    const bool has_special_param_exports =
+       (per_vertex_outputs & MS_VERT_ARG_EXP_MASK) ||
+       (per_primitive_outputs & MS_PRIM_ARG_EXP_MASK);
+@@ -1358,6 +1669,78 @@ ms_calculate_output_layout(const struct ac_compiler_info *info, unsigned api_sha
+    return l;
+ }
+ 
++/* What a part other than the first must not repeat: memory writes and
++ * atomics outside the workgroup, and the query counters. */
++static bool
++ms_is_part_side_effect(nir_intrinsic_instr *intrin)
++{
++   switch (intrin->intrinsic) {
++   case nir_intrinsic_store_ssbo:
++   case nir_intrinsic_store_global:
++   case nir_intrinsic_store_global_amd:
++   case nir_intrinsic_store_buffer_amd:
++   case nir_intrinsic_ssbo_atomic:
++   case nir_intrinsic_ssbo_atomic_swap:
++   case nir_intrinsic_global_atomic:
++   case nir_intrinsic_global_atomic_swap:
++   case nir_intrinsic_global_atomic_amd:
++   case nir_intrinsic_global_atomic_swap_amd:
++   case nir_intrinsic_image_store:
++   case nir_intrinsic_image_deref_store:
++   case nir_intrinsic_bindless_image_store:
++   case nir_intrinsic_image_atomic:
++   case nir_intrinsic_image_atomic_swap:
++   case nir_intrinsic_image_deref_atomic:
++   case nir_intrinsic_image_deref_atomic_swap:
++   case nir_intrinsic_bindless_image_atomic:
++   case nir_intrinsic_bindless_image_atomic_swap:
++   case nir_intrinsic_atomic_add_gen_prim_count_amd:
++   case nir_intrinsic_atomic_add_shader_invocation_count_amd:
++      return true;
++   case nir_intrinsic_store_deref:
++   case nir_intrinsic_deref_atomic:
++   case nir_intrinsic_deref_atomic_swap:
++      return nir_deref_mode_may_be(nir_src_as_deref(intrin->src[0]),
++                                   nir_var_mem_ssbo | nir_var_mem_global | nir_var_image);
++   default:
++      return false;
++   }
++}
++
++/* With ms_publish only the API workgroup's first part runs it, and only the
++ * finale's query counter remains to confine; the ring's own atomics must not
++ * be.
++ */
++static void
++ms_confine_side_effects_to_first_part(nir_shader *shader, lower_ngg_ms_state *s)
++{
++   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
++   nir_builder b = nir_builder_create(impl);
++
++   nir_foreach_block_safe(block, impl) {
++      nir_foreach_instr_safe(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic || !ms_is_part_side_effect(nir_instr_as_intrinsic(instr)))
++            continue;
++         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++         if (s->publish && intrin->intrinsic != nir_intrinsic_atomic_add_gen_prim_count_amd)
++            continue;
++
++         b.cursor = nir_before_instr(instr);
++         nir_if *if_first = nir_push_if(&b, nir_ieq_imm(&b, s->part, 0));
++         nir_instr_remove(instr);
++         nir_builder_instr_insert(&b, instr);
++         nir_pop_if(&b, if_first);
++
++         if (nir_intrinsic_infos[intrin->intrinsic].has_dest && !nir_def_is_unused(&intrin->def)) {
++            nir_def *value = nir_if_phi(&b, &intrin->def, nir_undef(&b, intrin->def.num_components,
++                                                                 intrin->def.bit_size));
++            nir_def_rewrite_uses_after(&intrin->def, value);
++         }
++      }
++   }
++   nir_progress(true, impl, nir_metadata_none);
++}
++
+ bool
+ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *options,
+                       bool *out_needs_scratch_ring)
+@@ -1380,12 +1763,36 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
+    unsigned max_vertices = shader->info.mesh.max_vertices_out;
+    unsigned max_primitives = shader->info.mesh.max_primitives_out;
+ 
++   /* Vertices of their own per primitive are built from any API vertex and
++    * primitive: every output is read across invocations. */
++   const unsigned prim_parts = options->ms_prim_parts;
++   assert(!prim_parts || options->compiler_info->gfx_level < GFX11);
++   if (prim_parts)
++      cross_invocation_access = ~0ull;
++
+    ms_out_mem_layout layout = ms_calculate_output_layout(
+       options->compiler_info, shader->info.shared_size, per_vertex_outputs, per_primitive_outputs,
+       cross_invocation_access, max_vertices, max_primitives, vertices_per_prim);
+ 
++   /* Published outputs: the LDS ones are copied 16 bytes at a time, and the
++    * scratch ring's go to the slot instead.
++    */
++   const bool publish = options->ms_publish && prim_parts > 1;
++   unsigned slot_lds_bytes = 0, slot_scratch_offset = 0, slot_bytes = 0, publish_slots = 0;
++   if (publish) {
++      layout.lds.total_size = align(layout.lds.total_size, 16);
++      assert(layout.lds.total_size <= 32 * 1024);
++      slot_lds_bytes = layout.lds.total_size - layout.lds.vtx_attr.addr;
++      slot_scratch_offset = MS_PUBLISH_COUNTS_BYTES + slot_lds_bytes;
++      const unsigned scratch_bytes =
++         layout.scratch_ring.prm_attr.addr + util_bitcount64(layout.scratch_ring.prm_attr.mask) * max_primitives * 16;
++      slot_bytes = align(slot_scratch_offset + scratch_bytes, 256);
++      publish_slots = MIN2(AC_MS_PUBLISH_MAX_SLOTS,
++                           1u << util_logbase2((AC_MS_PUBLISH_RING_BYTES - AC_MS_PUBLISH_HEADER_BYTES) / slot_bytes));
++   }
++
+    shader->info.shared_size = layout.lds.total_size;
+-   *out_needs_scratch_ring = layout.scratch_ring.vtx_attr.mask || layout.scratch_ring.prm_attr.mask;
++   *out_needs_scratch_ring = !publish && (layout.scratch_ring.vtx_attr.mask || layout.scratch_ring.prm_attr.mask);
+ 
+    /* The workgroup size that is specified by the API shader may be different
+     * from the size of the workgroup that actually runs on the HW, due to the
+@@ -1422,6 +1829,13 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
+       .output_counts_workgroup_uniform = true,
+       .vs_output_param_offset = options->vs_output_param_offset,
+       .has_param_exports = options->has_param_exports,
++      .prim_parts = prim_parts,
++      .part_prims = prim_parts ? DIV_ROUND_UP(max_primitives, prim_parts) : 0,
++      .publish = publish,
++      .publish_slots = publish_slots,
++      .slot_bytes = slot_bytes,
++      .slot_lds_bytes = slot_lds_bytes,
++      .slot_scratch_offset = slot_scratch_offset,
+    };
+ 
+    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+@@ -1438,12 +1852,21 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
+    handle_smaller_ms_api_workgroup(b, &state);
+    if (!fast_launch_2)
+       ms_emit_legacy_workgroup_index(b, &state);
++   if (!state.part) {
++      b->cursor = nir_before_impl(impl);
++      state.part = nir_imm_int(b, 0);
++   }
++   if (state.publish)
++      ms_publish_first_part_runs(b, &state);
+    ms_create_same_invocation_vars(b, &state);
+ 
+    lower_ms_intrinsics(shader, &state);
+ 
+    emit_ms_finale(b, &state);
+ 
++   if (prim_parts > 1)
++      ms_confine_side_effects_to_first_part(shader, &state);
++
+    /* Take care of metadata and validation before calling other passes */
+    nir_progress(true, impl, nir_metadata_none);
+    nir_validate_shader(shader, "after emitting NGG MS");
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index acf52578ea2..2e29a60154c 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -82,6 +82,7 @@ libradv_files = files(
+   'meta/radv_meta_clear_hiz.c',
+   'meta/radv_meta_copy.c',
+   'meta/radv_meta_copy_indirect_cs.c',
++  'meta/radv_meta_mesh_draw.c',
+   'meta/radv_meta_copy_indirect_fs.c',
+   'meta/radv_meta_copy_vrs_htile.c',
+   'meta/radv_meta_dcc_retile.c',
+diff --git a/src/amd/vulkan/meta/radv_meta.h b/src/amd/vulkan/meta/radv_meta.h
+index cae54f9f2df..72af06792fe 100644
+--- a/src/amd/vulkan/meta/radv_meta.h
++++ b/src/amd/vulkan/meta/radv_meta.h
+@@ -56,6 +56,8 @@ enum radv_meta_object_key_type {
+    RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_TRIANGLES,
+    RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_QUADS,
+    RADV_META_OBJECT_KEY_GS_COMPUTE_TESS_PREFIX_SUM,
++   RADV_META_OBJECT_KEY_MESH_DRAW_RECORDS,
++   RADV_META_OBJECT_KEY_TASK_CHUNKS,
+    RADV_META_OBJECT_KEY_COPY_MEMORY,
+    RADV_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER,
+    RADV_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE,
+@@ -381,6 +383,13 @@ radv_get_image_stride_for_96bit(const struct radv_device *device, const struct r
+    return stride;
+ }
+ 
++uint64_t radv_meta_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride,
++                                     uint64_t count_va, uint32_t max_count, uint32_t parts, uint64_t publish_ring,
++                                     uint64_t records_va, uint32_t task_rings, uint32_t task_draw_id);
++
++void radv_meta_task_chunks(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride, uint64_t count_va,
++                           uint32_t first_draw, uint32_t draws, uint32_t chunks, uint32_t entries, uint64_t out_va);
++
+ void radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
+                                        const VkCopyMemoryIndirectInfoKHR *pCopyMemoryIndirectInfo);
+ 
+diff --git a/src/amd/vulkan/meta/radv_meta_mesh_draw.c b/src/amd/vulkan/meta/radv_meta_mesh_draw.c
+new file mode 100644
+index 00000000000..1c9f9e39db1
+--- /dev/null
++++ b/src/amd/vulkan/meta/radv_meta_mesh_draw.c
+@@ -0,0 +1,151 @@
++/*
++ * Copyright © 2026 Valve Corporation
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#include "nir/radv_meta_nir.h"
++#include "radv_cmd_buffer.h"
++#include "radv_meta.h"
++#include "vk_shader_module.h"
++
++static VkResult
++get_pipeline(struct radv_device *device, enum radv_meta_object_key_type key, uint32_t push_constant_bytes,
++             nir_shader *(*build)(void), VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
++{
++   VkResult result;
++
++   const VkPushConstantRange pc_range = {
++      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
++      .size = push_constant_bytes,
++   };
++
++   result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key, sizeof(key),
++                                        layout_out);
++   if (result != VK_SUCCESS)
++      return result;
++
++   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(&device->meta_state.device, &key, sizeof(key));
++   if (pipeline_from_cache != VK_NULL_HANDLE) {
++      *pipeline_out = pipeline_from_cache;
++      return VK_SUCCESS;
++   }
++
++   nir_shader *cs = build();
++
++   const VkPipelineShaderStageCreateInfo stage_info = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
++      .module = vk_shader_module_handle_from_nir(cs),
++      .pName = "main",
++   };
++
++   const VkComputePipelineCreateInfo pipeline_info = {
++      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
++      .stage = stage_info,
++      .layout = *layout_out,
++   };
++
++   result = vk_meta_create_compute_pipeline(&device->vk, &device->meta_state.device, &pipeline_info, &key, sizeof(key),
++                                            pipeline_out);
++
++   ralloc_free(cs);
++   return result;
++}
++
++/* The records of an indirect mesh shader draw without DISPATCH_MESH_INDIRECT_MULTI
++ * (radv_mesh_draw_records_enabled), written from its commands before the draw reads them.
++ * publish_ring is the publish ring's address for a shader that publishes its outputs
++ * (radv_ms_publishes), 0 otherwise. An emulated task draw's chunk (radv_task_emulated)
++ * names where they go (records_va), its task rings and the task draw; otherwise records_va
++ * is 0 and they go to the upload buffer. Returns their address, 0 on failure.
++ */
++uint64_t
++radv_meta_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride,
++                            uint64_t count_va, uint32_t max_count, uint32_t parts, uint64_t publish_ring,
++                            uint64_t records_va, uint32_t task_rings, uint32_t task_draw_id)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   VkPipelineLayout layout;
++   VkPipeline pipeline;
++   uint32_t offset;
++
++   /* The commands' buffer holds max_count of them, so this is bounded by it. */
++   if (!records_va) {
++      const uint64_t size = (uint64_t)max_count * sizeof(struct radv_mesh_draw_record);
++      if (size > UINT32_MAX || !radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, size, 16, &offset, NULL)) {
++         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return 0;
++      }
++      records_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
++   }
++
++   VkResult result = get_pipeline(device, RADV_META_OBJECT_KEY_MESH_DRAW_RECORDS, 48,
++                                  radv_meta_nir_build_mesh_draw_records_cs, &pipeline, &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, result);
++      return 0;
++   }
++
++   radv_meta_begin(cmd_buffer);
++   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
++
++   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
++
++   /* The ring is in the 32-bit window. */
++   assert(publish_ring >> 32 == 0 || (publish_ring >> 32) == radv_device_physical(device)->info.address32_hi);
++   const uint32_t constants[12] = {
++      indirect_va,    indirect_va >> 32, records_va, records_va >> 32, count_va,   count_va >> 32,
++      stride,         max_count,         parts,      publish_ring,     task_rings, task_draw_id,
++   };
++   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
++
++   /* With a ring, one workgroup goes through the draws in order. */
++   radv_unaligned_dispatch(cmd_buffer, publish_ring ? 32 : max_count, 1, 1);
++
++   radv_meta_end(cmd_buffer);
++
++   /* The command processor reads the draws, the mesh shader the grids. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++
++   return records_va;
++}
++
++/* An emulated indirect task draw's chunks (radv_task_emulated), for draws
++ * draws from first_draw, of chunks chunks of up to entries task workgroups
++ * each: at out_va, a radv_task_emu_block a chunk, then the chunks' dispatch
++ * workgroups (x, 1, 1, 0), x being the chunk's count of workgroups, 0 past
++ * its draw's.
++ */
++void
++radv_meta_task_chunks(struct radv_cmd_buffer *cmd_buffer, uint64_t indirect_va, uint32_t stride, uint64_t count_va,
++                      uint32_t first_draw, uint32_t draws, uint32_t chunks, uint32_t entries, uint64_t out_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   VkPipelineLayout layout;
++   VkPipeline pipeline;
++
++   VkResult result = get_pipeline(device, RADV_META_OBJECT_KEY_TASK_CHUNKS, 44, radv_meta_nir_build_task_chunks_cs,
++                                  &pipeline, &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, result);
++      return;
++   }
++
++   radv_meta_begin(cmd_buffer);
++   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
++
++   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
++
++   const uint32_t constants[11] = {
++      indirect_va, indirect_va >> 32, count_va, count_va >> 32, out_va, out_va >> 32, stride, draws, chunks, entries,
++      first_draw,
++   };
++   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
++
++   radv_unaligned_dispatch(cmd_buffer, draws * chunks, 1, 1);
++
++   radv_meta_end(cmd_buffer);
++
++   /* The command processor reads the dispatches, the task shader the blocks. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++}
+diff --git a/src/amd/vulkan/nir/radv_meta_nir.c b/src/amd/vulkan/nir/radv_meta_nir.c
+index 6122f439b81..5a01044f11a 100644
+--- a/src/amd/vulkan/nir/radv_meta_nir.c
++++ b/src/amd/vulkan/nir/radv_meta_nir.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "radv_meta_nir.h"
++#include "radv_shader.h"
+ #include "nir/nir_format_convert.h"
+ #include "ac_nir_surface.h"
+ #include "ac_surface.h"
+@@ -1428,6 +1429,208 @@ radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void)
+    return b.shader;
+ }
+ 
++/* radv_meta_mesh_draw_records: a mesh shader draw's record (radv_mesh_draw_record)
++ * from each VkDrawMeshTasksIndirectCommandEXT. With a publish ring (a shader
++ * that publishes its outputs, radv_ms_publishes), one workgroup of one subgroup
++ * goes through the draws in order, as the command processor launches them, to
++ * give each its first workgroup among the packet's; the first record gets the
++ * ring and the packet's workgroups. Without, an invocation writes a draw.
++ */
++static void
++mesh_draw_record(nir_builder *b, nir_def *draw, nir_def *records_addr, nir_def *parts, nir_def *ring,
++                 nir_def *first_workgroup, nir_def *grid, nir_def *task_rings, nir_def *task_draw_id)
++{
++   /* A vertex launches a workgroup, or each of its parts. */
++   nir_def *vertices = nir_imul(b, nir_imul(b, nir_channel(b, grid, 0), nir_channel(b, grid, 1)),
++                                nir_imul(b, nir_channel(b, grid, 2), parts));
++   nir_def *zero = nir_imm_int(b, 0);
++
++   nir_def *record_addr =
++      nir_iadd(b, records_addr, nir_u2u64(b, nir_imul_imm(b, draw, sizeof(struct radv_mesh_draw_record))));
++   nir_build_store_global(b, nir_vec4(b, vertices, nir_imm_int(b, 1), zero, zero), record_addr, .align_mul = 16);
++   nir_build_store_global(b, nir_vec4(b, nir_channel(b, grid, 0), nir_channel(b, grid, 1), nir_channel(b, grid, 2), ring),
++                          nir_iadd_imm(b, record_addr, 16), .align_mul = 16);
++   nir_build_store_global(b, nir_vec4(b, nir_unpack_64_2x32_split_x(b, first_workgroup),
++                                      nir_unpack_64_2x32_split_y(b, first_workgroup), zero, zero),
++                          nir_iadd_imm(b, record_addr, 32), .align_mul = 16);
++   nir_build_store_global(b, nir_vec4(b, task_rings, task_draw_id, zero, zero), nir_iadd_imm(b, record_addr, 48),
++                          .align_mul = 16);
++}
++
++static nir_def *
++mesh_draw_grid(nir_builder *b, nir_def *draw, nir_def *indirect_addr, nir_def *stride)
++{
++   nir_def *cmd_addr = nir_iadd(b, indirect_addr, nir_imul(b, nir_u2u64(b, draw), nir_u2u64(b, stride)));
++   return nir_build_load_global(b, 3, 32, cmd_addr, .align_mul = 4);
++}
++
++nir_shader *
++radv_meta_nir_build_mesh_draw_records_cs(void)
++{
++   static_assert(sizeof(struct radv_mesh_draw_record) == 64 && offsetof(struct radv_mesh_draw_record, grid) == 16 &&
++                    offsetof(struct radv_mesh_draw_record, publish_ring) == 28 &&
++                    offsetof(struct radv_mesh_draw_record, first_workgroup) == 32 &&
++                    offsetof(struct radv_mesh_draw_record, workgroups) == 40 &&
++                    offsetof(struct radv_mesh_draw_record, task_rings) == 48 &&
++                    offsetof(struct radv_mesh_draw_record, task_draw_id) == 52,
++                 "the stores below");
++
++   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_mesh_draw_records_cs");
++   /* One subgroup, whatever the wave size. */
++   b.shader->info.workgroup_size[0] = 32;
++
++   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
++
++   nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
++   nir_def *records_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 8, .range = 8);
++   nir_def *count_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
++   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
++   nir_def *max_count = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
++   nir_def *parts = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
++   nir_def *ring = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 36, .range = 4);
++   nir_def *task_rings = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 40, .range = 4);
++   nir_def *task_draw_id = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 44, .range = 4);
++
++   /* Only the draws the count buffer has. */
++   nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
++   nir_def *count = nir_umin(&b, nir_build_load_global(&b, 1, 32, count_addr, .align_mul = 4), max_count);
++   nir_pop_if(&b, NULL);
++   count = nir_if_phi(&b, count, max_count);
++
++   nir_push_if(&b, nir_ieq_imm(&b, ring, 0));
++   {
++      nir_push_if(&b, nir_ult(&b, global_id, count));
++      {
++         nir_def *grid = mesh_draw_grid(&b, global_id, indirect_addr, stride);
++         mesh_draw_record(&b, global_id, records_addr, parts, ring, nir_imm_int64(&b, 0), grid, task_rings,
++                          task_draw_id);
++      }
++      nir_pop_if(&b, NULL);
++   }
++   nir_push_else(&b, NULL);
++   {
++      nir_variable *first_var = nir_local_variable_create(b.impl, glsl_uint_type(), "first_draw");
++      nir_variable *workgroups_var = nir_local_variable_create(b.impl, glsl_uint64_t_type(), "workgroups");
++      nir_store_var(&b, first_var, nir_imm_int(&b, 0), 0x1);
++      nir_store_var(&b, workgroups_var, nir_imm_int64(&b, 0), 0x1);
++
++      nir_def *lane = nir_load_local_invocation_index(&b);
++      nir_push_loop(&b);
++      {
++         nir_def *first = nir_load_var(&b, first_var);
++         nir_break_if(&b, nir_uge(&b, first, count));
++
++         nir_def *draw = nir_iadd(&b, first, lane);
++         nir_def *active = nir_ult(&b, draw, count);
++         nir_def *no_grid = nir_imm_zero(&b, 3, 32);
++         nir_push_if(&b, active);
++         nir_def *grid = mesh_draw_grid(&b, draw, indirect_addr, stride);
++         nir_pop_if(&b, NULL);
++         grid = nir_if_phi(&b, grid, no_grid);
++
++         /* An application's grid is at most maxMeshWorkGroupTotalCount, so a
++          * subgroup's 32 add up in 32 bits. */
++         nir_def *own = nir_imul(&b, nir_imul(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1)),
++                                 nir_channel(&b, grid, 2));
++         nir_def *before = nir_exclusive_scan(&b, own, .reduction_op = nir_op_iadd);
++         nir_def *sum = nir_reduce(&b, own, .reduction_op = nir_op_iadd);
++         nir_def *workgroups = nir_load_var(&b, workgroups_var);
++
++         nir_push_if(&b, active);
++         mesh_draw_record(&b, draw, records_addr, parts, ring, nir_iadd(&b, workgroups, nir_u2u64(&b, before)),
++                          grid, task_rings, task_draw_id);
++         nir_pop_if(&b, NULL);
++
++         nir_store_var(&b, workgroups_var, nir_iadd(&b, workgroups, nir_u2u64(&b, sum)), 0x1);
++         nir_store_var(&b, first_var, nir_iadd_imm(&b, first, 32), 0x1);
++      }
++      nir_pop_loop(&b, NULL);
++
++      nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
++      {
++         nir_def *workgroups = nir_load_var(&b, workgroups_var);
++         nir_build_store_global(&b,
++                                nir_vec2(&b, nir_unpack_64_2x32_split_x(&b, workgroups),
++                                         nir_unpack_64_2x32_split_y(&b, workgroups)),
++                                nir_iadd_imm(&b, records_addr, offsetof(struct radv_mesh_draw_record, workgroups)),
++                                .align_mul = 8);
++      }
++      nir_pop_if(&b, NULL);
++   }
++   nir_pop_if(&b, NULL);
++
++   return b.shader;
++}
++
++/* radv_meta_task_chunks: for an emulated indirect task draw (radv_task_emulated),
++ * each draw's chunks of up to entries task workgroups: the chunk's block
++ * (radv_task_emu_block) and its dispatch's workgroups, 0 past the draw's, which
++ * the chunk's records and draw take as their count. An invocation a chunk.
++ */
++nir_shader *
++radv_meta_nir_build_task_chunks_cs(void)
++{
++   static_assert(sizeof(struct radv_task_emu_block) == 32 && offsetof(struct radv_task_emu_block, draw_id) == 12 &&
++                    offsetof(struct radv_task_emu_block, first_workgroup) == 16,
++                 "the stores below");
++
++   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_task_chunks_cs");
++   b.shader->info.workgroup_size[0] = 64;
++
++   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 1);
++
++   nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
++   nir_def *count_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 8, .range = 8);
++   nir_def *out_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
++   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
++   nir_def *draws = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
++   nir_def *chunks = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
++   nir_def *entries = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 36, .range = 4);
++   nir_def *first_draw = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 40, .range = 4);
++
++   nir_def *total = nir_imul(&b, draws, chunks);
++   nir_push_if(&b, nir_ult(&b, global_id, total));
++   {
++      nir_def *draw = nir_iadd(&b, first_draw, nir_udiv(&b, global_id, chunks));
++      nir_def *chunk = nir_umod(&b, global_id, chunks);
++
++      /* Only the draws the count buffer has. */
++      nir_def *all = nir_iadd(&b, first_draw, draws);
++      nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
++      nir_def *count = nir_umin(&b, nir_build_load_global(&b, 1, 32, count_addr, .align_mul = 4), all);
++      nir_pop_if(&b, NULL);
++      count = nir_if_phi(&b, count, all);
++
++      nir_def *no_grid = nir_imm_zero(&b, 3, 32);
++      nir_push_if(&b, nir_ult(&b, draw, count));
++      nir_def *grid = nir_build_load_global(
++         &b, 3, 32, nir_iadd(&b, indirect_addr, nir_imul(&b, nir_u2u64(&b, draw), nir_u2u64(&b, stride))),
++         .align_mul = 4);
++      nir_pop_if(&b, NULL);
++      grid = nir_if_phi(&b, grid, no_grid);
++
++      nir_def *workgroups =
++         nir_imul(&b, nir_imul(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1)), nir_channel(&b, grid, 2));
++      nir_def *first = nir_imul(&b, chunk, entries);
++      nir_def *groups = nir_umin(&b, nir_usub_sat(&b, workgroups, first), entries);
++
++      nir_def *block_addr = nir_iadd(&b, out_addr, nir_u2u64(&b, nir_imul_imm(&b, global_id, 32)));
++      nir_build_store_global(&b, nir_vec4(&b, nir_channel(&b, grid, 0), nir_channel(&b, grid, 1),
++                                          nir_channel(&b, grid, 2), draw),
++                             block_addr, .align_mul = 16);
++      nir_build_store_global(&b, nir_pad_vector_imm_int(&b, first, 0, 4), nir_iadd_imm(&b, block_addr, 16),
++                             .align_mul = 16);
++
++      nir_def *args_addr = nir_iadd(&b, nir_iadd(&b, out_addr, nir_u2u64(&b, nir_imul_imm(&b, total, 32))),
++                                    nir_u2u64(&b, nir_imul_imm(&b, global_id, 16)));
++      nir_def *one = nir_imm_int(&b, 1);
++      nir_build_store_global(&b, nir_vec4(&b, groups, one, one, nir_imm_int(&b, 0)), args_addr, .align_mul = 16);
++   }
++   nir_pop_if(&b, NULL);
++
++   return b.shader;
++}
++
+ nir_shader *
+ radv_meta_nir_build_copy_memory_indirect_cs(void)
+ {
+diff --git a/src/amd/vulkan/nir/radv_meta_nir.h b/src/amd/vulkan/nir/radv_meta_nir.h
+index 41afd00bf7d..1bead4e8b68 100644
+--- a/src/amd/vulkan/nir/radv_meta_nir.h
++++ b/src/amd/vulkan/nir/radv_meta_nir.h
+@@ -98,6 +98,8 @@ nir_shader *radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, boo
+ nir_shader *radv_meta_nir_build_clear_hiz_compute_shader(uint32_t samples);
+ 
+ nir_shader *radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void);
++nir_shader *radv_meta_nir_build_mesh_draw_records_cs(void);
++nir_shader *radv_meta_nir_build_task_chunks_cs(void);
+ nir_shader *radv_meta_nir_build_copy_memory_indirect_cs(void);
+ 
+ nir_shader *radv_meta_nir_build_copy_memory_to_image_indirect_preprocess_cs(void);
+diff --git a/src/amd/vulkan/nir/radv_nir.h b/src/amd/vulkan/nir/radv_nir.h
+index f1e100e8312..7eb4f935661 100644
+--- a/src/amd/vulkan/nir/radv_nir.h
++++ b/src/amd/vulkan/nir/radv_nir.h
+@@ -33,6 +33,9 @@ bool radv_nir_lower_descriptors(nir_shader *shader, const struct radv_compiler_i
+ bool radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struct radv_shader_stage *stage,
+                         const struct radv_graphics_state_key *gfx_state, uint32_t address32_hi);
+ 
++bool radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage,
++                                      uint32_t address32_hi);
++
+ bool radv_nir_lower_hit_attrib_derefs(nir_shader *shader);
+ 
+ bool radv_nir_lower_ray_payload_derefs(nir_shader *shader, uint32_t offset);
+diff --git a/src/amd/vulkan/nir/radv_nir_lower_abi.c b/src/amd/vulkan/nir/radv_nir_lower_abi.c
+index 382cab62d0e..bbbc20667fc 100644
+--- a/src/amd/vulkan/nir/radv_nir_lower_abi.c
++++ b/src/amd/vulkan/nir/radv_nir_lower_abi.c
+@@ -524,3 +524,156 @@ radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struc
+    progress |= nir_shader_intrinsics_pass(shader, lower_abi_instr, nir_metadata_control_flow, &state);
+    return progress;
+ }
++
++static bool
++lower_mesh_draw_record(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
++{
++   const lower_abi_state *s = state;
++   const unsigned record_bytes = sizeof(struct radv_mesh_draw_record);
++   const bool has_task = s->info->ms.has_task;
++
++   switch (intrin->intrinsic) {
++   case nir_intrinsic_load_num_workgroups:
++   case nir_intrinsic_load_ms_publish_ring_amd:
++   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
++   case nir_intrinsic_load_ms_publish_workgroups_amd:
++      break;
++   case nir_intrinsic_load_draw_id:
++   case nir_intrinsic_load_task_ring_entry_amd:
++   case nir_intrinsic_load_ring_task_draw_amd:
++   case nir_intrinsic_load_ring_task_payload_amd:
++      if (!has_task)
++         return false;
++      break;
++   default:
++      return false;
++   }
++
++   b->cursor = nir_before_instr(&intrin->instr);
++
++   nir_def *records = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ms_draw_records),
++                                             nir_imm_int(b, s->address32_hi));
++   /* The draw's index in its packet, which the load below is not replaced
++    * again for: it is the record's. */
++   nir_def *draw = nir_imul_imm(b, nir_load_draw_id(b), record_bytes);
++   nir_def *first_record = nir_imm_int(b, 0);
++   nir_def *value;
++
++   switch (intrin->intrinsic) {
++   case nir_intrinsic_load_num_workgroups:
++      value = ac_nir_load_smem(b, 3, records, nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, grid)), 4,
++                               ACCESS_CAN_SPECULATE);
++      break;
++   case nir_intrinsic_load_ms_publish_ring_amd:
++      value = ac_nir_load_smem(b, 1, records,
++                               nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, publish_ring)), 4,
++                               ACCESS_CAN_SPECULATE);
++      value = nir_pack_64_2x32_split(b, value, nir_imm_int(b, s->address32_hi));
++      break;
++   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
++      value = ac_nir_load_smem(b, 2, records,
++                               nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, first_workgroup)), 4,
++                               ACCESS_CAN_SPECULATE);
++      value = nir_pack_64_2x32(b, value);
++      break;
++   case nir_intrinsic_load_ms_publish_workgroups_amd:
++      value = ac_nir_load_smem(b, 2, records,
++                               nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, workgroups)), 4,
++                               ACCESS_CAN_SPECULATE);
++      value = nir_pack_64_2x32(b, value);
++      break;
++   case nir_intrinsic_load_draw_id:
++      /* Fed by an emulated task shader: the task draw's index. */
++      value = ac_nir_load_smem(b, 1, records,
++                               nir_iadd_imm(b, draw, offsetof(struct radv_mesh_draw_record, task_draw_id)), 4,
++                               ACCESS_CAN_SPECULATE);
++      break;
++   case nir_intrinsic_load_task_ring_entry_amd:
++      /* The record's index is its task workgroup's ring entry. */
++      value = nir_load_draw_id(b);
++      break;
++   default: {
++      /* The task rings, from the table the first record names. */
++      const unsigned ring = intrin->intrinsic == nir_intrinsic_load_ring_task_draw_amd ? RING_TS_DRAW : RING_TS_PAYLOAD;
++      nir_def *table = ac_nir_load_smem(
++         b, 1, records, nir_iadd_imm(b, first_record, offsetof(struct radv_mesh_draw_record, task_rings)), 4,
++         ACCESS_CAN_SPECULATE);
++      table = nir_pack_64_2x32_split(b, table, nir_imm_int(b, s->address32_hi));
++      value = ac_nir_load_smem(b, 4, table, nir_imm_int(b, ring * 16u), 4, ACCESS_CAN_SPECULATE);
++      break;
++   }
++   }
++
++   nir_def_replace(&intrin->def, value);
++   return true;
++}
++
++/* An emulated task shader's chunk (radv_task_emu_block): its workgroups are
++ * dispatched in one dimension from the chunk's first. */
++static bool
++lower_task_emulation(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
++{
++   const lower_abi_state *s = state;
++
++   if (intrin->intrinsic != nir_intrinsic_load_num_workgroups && intrin->intrinsic != nir_intrinsic_load_draw_id &&
++       intrin->intrinsic != nir_intrinsic_load_workgroup_id && intrin->intrinsic != nir_intrinsic_load_task_ring_entry_amd)
++      return false;
++
++   b->cursor = nir_before_instr(&intrin->instr);
++
++   nir_def *block = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->task_emu),
++                                           nir_imm_int(b, s->address32_hi));
++   nir_def *grid = ac_nir_load_smem(b, 3, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, grid)), 4,
++                                    ACCESS_CAN_SPECULATE);
++   nir_def *value;
++
++   switch (intrin->intrinsic) {
++   case nir_intrinsic_load_num_workgroups:
++      value = grid;
++      break;
++   case nir_intrinsic_load_draw_id:
++      value = ac_nir_load_smem(b, 1, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, draw_id)), 4,
++                               ACCESS_CAN_SPECULATE);
++      break;
++   case nir_intrinsic_load_task_ring_entry_amd:
++      /* A chunk's first workgroup is a multiple of the ring's entries. */
++      value = nir_imm_int(b, 0);
++      break;
++   default: {
++      nir_def *first = ac_nir_load_smem(b, 1, block, nir_imm_int(b, offsetof(struct radv_task_emu_block, first_workgroup)),
++                                        4, ACCESS_CAN_SPECULATE);
++      nir_def *index = nir_iadd(b, first, ac_nir_load_arg(b, &s->args->ac, s->args->ac.workgroup_ids[0]));
++      nir_def *x = nir_channel(b, grid, 0), *y = nir_channel(b, grid, 1);
++      nir_def *plane = nir_imul(b, x, y);
++      value = nir_vec3(b, nir_umod(b, index, x), nir_umod(b, nir_udiv(b, index, x), y), nir_udiv(b, index, plane));
++      break;
++   }
++   }
++
++   nir_def_replace(&intrin->def, value);
++   return true;
++}
++
++/* A mesh shader's workgroup count from its draw's record
++ * (radv_mesh_draw_record), and what a shader that publishes its outputs or is
++ * fed by an emulated task shader reads there; an emulated task shader's
++ * workgroups and draw from its chunk's block. Before the draw ID is lowered to
++ * its argument.
++ */
++bool
++radv_nir_lower_mesh_draw_records(nir_shader *shader, const struct radv_shader_stage *stage, uint32_t address32_hi)
++{
++   lower_abi_state state = {
++      .info = &stage->info,
++      .args = &stage->args,
++      .address32_hi = address32_hi,
++   };
++
++   if (shader->info.stage == MESA_SHADER_TASK && stage->args.task_emu.used)
++      return nir_shader_intrinsics_pass(shader, lower_task_emulation, nir_metadata_control_flow, &state);
++
++   if (shader->info.stage != MESA_SHADER_MESH || !stage->info.ms.draw_records)
++      return false;
++
++   return nir_shader_intrinsics_pass(shader, lower_mesh_draw_record, nir_metadata_control_flow, &state);
++}
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+index 50113533b6c..9bda3a88916 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -3663,9 +3663,15 @@ radv_emit_ps_inputs(struct radv_cmd_buffer *cmd_buffer)
+       ps_input_cntl[ps_offset++] = offset_to_ps_input(outinfo->vs_output_param_offset[VARYING_SLOT_PRIMITIVE_ID], t);
+    }
+ 
+-   /* Per-primitive PS inputs: the HW needs these to be last. */
+-   num_per_primitive_params += util_bitcount(ps->info.ps.input_per_primitive_mask);
+-   input_mask_to_ps_inputs(outinfo, ps, ps->info.ps.input_per_primitive_mask, ps_input_cntl, &ps_offset, per_prim);
++   /* Per-primitive PS inputs: the HW needs these to be last. A mesh shader
++    * without per-primitive parameters exports them per vertex, flat on
++    * vertices each primitive has to itself (radv_shader_info.ms.prim_parts). */
++   const bool per_prim_as_vertex =
++      last_vgt_shader->info.stage == MESA_SHADER_MESH && last_vgt_shader->info.ms.prim_parts;
++   if (!per_prim_as_vertex)
++      num_per_primitive_params += util_bitcount(ps->info.ps.input_per_primitive_mask);
++   input_mask_to_ps_inputs(outinfo, ps, ps->info.ps.input_per_primitive_mask, ps_input_cntl, &ps_offset,
++                           per_prim_as_vertex ? radv_ps_in_flat : per_prim);
+ 
+    /* Only GFX10.3+ support per-primitive params */
+    assert(pdev->info.gfx_level >= GFX10_3 || num_per_primitive_params == 0);
+@@ -4025,7 +4031,9 @@ radv_emit_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
+          radv_emit_mesh_shader(cmd_buffer);
+          break;
+       case MESA_SHADER_TASK:
+-         radv_emit_compute_shader(pdev, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK]);
++         /* An emulated task shader goes with its dispatches (radv_task_emulation). */
++         if (cmd_buffer->gang.cs)
++            radv_emit_compute_shader(pdev, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK]);
+          break;
+       default:
+          UNREACHABLE("invalid bind stage");
+@@ -6508,7 +6516,7 @@ radv_flush_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags st
+          radv_emit_descriptors_per_stage(device, cs, cmd_buffer->state.shaders[stage], descriptors_state);
+       }
+ 
+-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
++      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
+          radv_emit_descriptors_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                          descriptors_state);
+       }
+@@ -6587,7 +6595,7 @@ radv_flush_descriptor_heaps(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFla
+                                               cmd_buffer->descriptor_heaps);
+       }
+ 
+-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
++      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
+          radv_emit_descriptor_heaps_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                               descriptors_state, cmd_buffer->descriptor_heaps);
+       }
+@@ -6764,7 +6772,7 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
+          }
+       }
+ 
+-      if (internal_stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
++      if ((internal_stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
+          radv_emit_push_constants_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                             (uint32_t *)cmd_buffer->push_constants, va);
+       }
+@@ -6813,7 +6821,7 @@ radv_flush_dynamic_descriptors_offsets(struct radv_cmd_buffer *cmd_buffer, VkSha
+                                  va);
+    }
+ 
+-   if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
++   if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
+       radv_emit_userdata_address(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                  AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
+    }
+@@ -6864,7 +6872,7 @@ radv_flush_dynamic_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStage
+          radv_emit_userdata_address(device, cs, cmd_buffer->state.shaders[stage], AC_UD_DYNAMIC_DESCRIPTORS, va);
+       }
+ 
+-      if (stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
++      if ((stages & VK_SHADER_STAGE_TASK_BIT_EXT) && cmd_buffer->gang.cs) {
+          radv_emit_userdata_address(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                     AC_UD_DYNAMIC_DESCRIPTORS, va);
+       }
+@@ -9061,6 +9069,11 @@ radv_bind_fragment_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
+ static void
+ radv_bind_task_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *ts)
+ {
++   /* Emulated task shaders run on the graphics ring, with memory of their own
++    * (radv_task_emulation). */
++   if (radv_task_emulated(radv_device_physical(radv_cmd_buffer_device(cmd_buffer))))
++      return;
++
+    if (!radv_gang_init(cmd_buffer))
+       return;
+ 
+@@ -11581,6 +11594,36 @@ radv_emit_userdata_mesh(struct radv_cmd_buffer *cmd_buffer, const uint32_t x, co
+    const bool uses_drawid = state->uses_drawid;
+    const bool uses_grid_size = mesh_shader->info.cs.uses_grid_size;
+ 
++   if (mesh_shader->info.ms.draw_records) {
++      const struct radeon_winsys_bo *ring = radv_cmd_buffer_device(cmd_buffer)->ms_publish_ring;
++      const struct radv_mesh_draw_record record = {
++         .grid = {x, y, z},
++         .publish_ring = radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0,
++         .workgroups = (uint64_t)x * y * z,
++      };
++      uint32_t offset;
++
++      if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(record), &record, &offset)) {
++         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++         return;
++      }
++      radv_emit_userdata_address(radv_cmd_buffer_device(cmd_buffer), cs, mesh_shader, AC_UD_VS_MS_DRAW_RECORDS,
++                                 radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset);
++   }
++
++   if (radv_mesh_draw_records_enabled(radv_device_physical(radv_cmd_buffer_device(cmd_buffer)))) {
++      /* The first vertex, then the draw ID. */
++      radeon_begin(cs);
++      radeon_set_sh_reg_seq(state->vtx_base_sgpr, state->vtx_emit_num);
++      radeon_emit(0);
++      if (uses_drawid) {
++         radeon_emit(0);
++         state->last_drawid = 0;
++      }
++      radeon_end();
++      return;
++   }
++
+    if (!uses_drawid && !uses_grid_size)
+       return;
+ 
+@@ -11827,7 +11870,19 @@ radv_cs_emit_mesh_dispatch_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
+    radv_gfx12_emit_wa(device, &cmd_buffer->state, cs);
+ }
+ 
+-ALWAYS_INLINE static void
++ALWAYS_INLINE /* Draw packets of a mesh shader that publishes its outputs (radv_ms_publishes)
++ * each start the publish ring from zero, which the last workgroups of the one
++ * before leave it at: the next may not start before they end.
++ */
++static void
++radv_emit_ms_publish_separation(struct radv_cmd_buffer *cmd_buffer)
++{
++   radeon_begin(cmd_buffer->cs);
++   radeon_event_write(V_028A90_VS_PARTIAL_FLUSH);
++   radeon_end();
++}
++
++static void
+ radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint32_t z)
+ {
+    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+@@ -11847,11 +11902,17 @@ radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
+          }
+       }
+    } else {
+-      const uint32_t count = x * y * z;
++      /* A mesh shader exporting its primitives in parts launches a hardware
++       * workgroup per part (radv_shader_info.ms.prim_parts). */
++      const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
++      const uint32_t count = x * y * z * MAX2(mesh_shader->info.ms.prim_parts, 1);
++      const bool publishes = radv_ms_publishes(&mesh_shader->info);
+       if (!view_mask) {
+          radv_cs_emit_draw_packet(cmd_buffer, count, 0);
+       } else {
+          u_foreach_bit (view, view_mask) {
++            if (publishes && view != ffs(view_mask) - 1)
++               radv_emit_ms_publish_separation(cmd_buffer);
+             radv_emit_view_index(pdev, &cmd_buffer->state, cs, view);
+             radv_cs_emit_draw_packet(cmd_buffer, count, 0);
+          }
+@@ -11873,6 +11934,35 @@ radv_emit_indirect_buffer(struct radv_cmd_stream *cs, uint64_t va, bool is_compu
+    radeon_end();
+ }
+ 
++/* Without DISPATCH_MESH_INDIRECT_MULTI: ordinary indirect draws of the
++ * records radv_meta_mesh_draw_records wrote.
++ */
++static void
++radv_emit_mesh_draw_records_packets(const struct radv_physical_device *pdev, struct radv_cmd_buffer *cmd_buffer,
++                                    const struct radv_draw_info *info, uint64_t records_va)
++{
++   struct radv_cmd_state *state = &cmd_buffer->state;
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++
++   radv_emit_indirect_buffer(cs, records_va, false);
++   radv_emit_userdata_address(radv_cmd_buffer_device(cmd_buffer), cs, state->shaders[MESA_SHADER_MESH],
++                              AC_UD_VS_MS_DRAW_RECORDS, records_va);
++
++   if (!state->render.view_mask) {
++      radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
++                                        sizeof(struct radv_mesh_draw_record), true);
++   } else {
++      const bool publishes = radv_ms_publishes(&state->shaders[MESA_SHADER_MESH]->info);
++      u_foreach_bit (i, state->render.view_mask) {
++         if (publishes && i != ffs(state->render.view_mask) - 1)
++            radv_emit_ms_publish_separation(cmd_buffer);
++         radv_emit_view_index(pdev, &cmd_buffer->state, cs, i);
++         radv_cs_emit_indirect_draw_packet(cmd_buffer, false, info->count, info->count_va,
++                                           sizeof(struct radv_mesh_draw_record), true);
++      }
++   }
++}
++
+ ALWAYS_INLINE static void
+ radv_emit_indirect_mesh_draw_packets(const struct radv_physical_device *pdev, struct radv_cmd_buffer *cmd_buffer,
+                                      const struct radv_draw_info *info)
+@@ -12423,7 +12513,8 @@ radv_emit_task_state(struct radv_cmd_buffer *cmd_buffer)
+    const struct radv_physical_device *pdev = radv_device_physical(device);
+    const struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+ 
+-   if (!task_shader || !pdev->emulate_mesh_shader_queries)
++   /* An emulated task dispatch sets it itself (radv_task_emulation). */
++   if (!task_shader || !pdev->emulate_mesh_shader_queries || !cmd_buffer->gang.cs)
+       return;
+ 
+    const uint32_t task_state_offset = radv_get_user_sgpr_loc(task_shader, AC_UD_TASK_STATE);
+@@ -14005,11 +14096,22 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
+ 
+    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
+    struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
++   /* An emulated task shader's state goes with its dispatches (radv_task_emulation). */
++   const bool task_on_ace = task_shader && ace_cs;
+ 
+-   assert(!task_shader || ace_cs);
++   assert(!task_shader || ace_cs || radv_task_emulated(pdev));
++
++   /* A mesh shader that publishes its outputs starts the ring from zero, which
++    * the last draw packet that used it leaves it at once its waves end
++    * (radv_emit_ms_publish_separation). */
++   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
++   if (mesh_shader && radv_ms_publishes(&mesh_shader->info)) {
++      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH;
++      radv_cs_add_buffer(device->ws, cs->b, device->ms_publish_ring);
++   }
+ 
+    const VkShaderStageFlags stages =
+-      VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | (task_shader ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
++      VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | (task_on_ace ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
+ 
+    ASSERTED const unsigned cdw_max = radeon_check_space(device->ws, cs->b, 4096 + 128 * (drawCount - 1));
+    ASSERTED const unsigned ace_cdw_max =
+@@ -14042,14 +14144,14 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
+    if (pdev->info.gfx_level >= GFX12) {
+       radv_gfx12_emit_buffered_regs(device, cs);
+ 
+-      if (task_shader)
++      if (task_on_ace)
+          radv_gfx12_emit_buffered_regs(device, cmd_buffer->gang.cs);
+    }
+ 
+    if (cmd_buffer->state.flush_bits)
+       radv_emit_cache_flush(cmd_buffer);
+ 
+-   if (task_shader) {
++   if (task_on_ace) {
+       radv_gang_cache_flush(cmd_buffer);
+ 
+       if (radv_flush_gang_leader_semaphore(cmd_buffer)) {
+@@ -14186,6 +14288,48 @@ radv_gs_compute_heap(struct radv_cmd_buffer *cmd_buffer)
+    return va;
+ }
+ 
++/* A graphics stage's descriptor sets, heaps, push constants and dynamic
++ * descriptors, for the stage run as a compute dispatch. */
++static void
++radv_emit_graphics_stage_for_compute(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *shader)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
++
++   if (descriptors->need_indirect_descriptors)
++      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
++   const uint32_t dirty = descriptors->dirty;
++   descriptors->dirty = descriptors->valid;
++   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
++   descriptors->dirty = dirty;
++
++   /* Every valid set and heap: the draw's own flush has cleared their dirty
++    * bits for the stages it drew with. */
++   const uint32_t dirty_heaps = descriptors->dirty_heaps;
++   descriptors->dirty_heaps = descriptors->valid_heaps;
++   radv_emit_descriptor_heaps_per_stage(device, cs, shader, descriptors, cmd_buffer->descriptor_heaps);
++   descriptors->dirty_heaps = dirty_heaps;
++
++   const struct radv_push_constant_state *push_constants =
++      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
++   uint64_t push_constants_va = 0;
++   if (push_constants->size)
++      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
++   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
++
++   if (descriptors->dynamic_offset_count) {
++      uint64_t va = 0;
++      radv_upload_dynamic_descriptors(cmd_buffer, descriptors, &va);
++      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS, va);
++   }
++   if (descriptors->need_dynamic_descriptors_offset_addr) {
++      uint64_t va = 0;
++      radv_upload_dynamic_descriptors_offsets(cmd_buffer, descriptors, &va);
++      radv_emit_userdata_address(device, cs, shader, AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR, va);
++   }
++}
++
+ /* One compute pass: x by y invocations, or the workgroup counts at
+  * indirect_va. */
+ static void
+@@ -14209,21 +14353,9 @@ radv_gs_compute_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_s
+ 
+    radv_emit_compute_shader(pdev, cs, shader);
+ 
+-   /* The graphics state's descriptor sets and push constants, all of them. */
+-   struct radv_descriptor_state *descriptors = radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+-   if (descriptors->need_indirect_descriptors)
+-      radv_upload_indirect_descriptor_sets(cmd_buffer, descriptors);
+-   const uint32_t dirty = descriptors->dirty;
+-   descriptors->dirty = descriptors->valid;
+-   radv_emit_descriptors_per_stage(device, cs, shader, descriptors);
+-   descriptors->dirty = dirty;
+-
+-   const struct radv_push_constant_state *push_constants =
+-      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+-   uint64_t push_constants_va = 0;
+-   if (push_constants->size)
+-      radv_upload_push_constants(cmd_buffer, push_constants, &push_constants_va);
+-   radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, push_constants_va);
++   /* The graphics state's descriptor sets, heaps, push constants and
++    * dynamic descriptors, all of them. */
++   radv_emit_graphics_stage_for_compute(cmd_buffer, shader);
+ 
+    radv_emit_userdata_address(device, cs, shader, AC_UD_CS_GS_COMPUTE_DRAW, draw_va);
+ 
+@@ -15237,6 +15369,276 @@ radv_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDraw
+    radv_after_draw(cmd_buffer);
+ }
+ 
++/* The records of an indirect mesh shader draw without task shader when there
++ * is no DISPATCH_MESH_INDIRECT_MULTI (radv_mesh_draw_records_enabled), 0
++ * otherwise or on failure.
++ */
++static uint64_t
++radv_mesh_draw_records(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info)
++{
++   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
++
++   if (!radv_mesh_draw_records_enabled(pdev) || !info->count)
++      return 0;
++
++   if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS)
++      radv_bind_graphics_shaders(cmd_buffer);
++
++   /* An emulated task draw writes its own (radv_task_emulation). */
++   if (cmd_buffer->state.shaders[MESA_SHADER_TASK])
++      return 0;
++
++   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
++   assert(mesh_shader);
++
++   const struct radeon_winsys_bo *ring = radv_cmd_buffer_device(cmd_buffer)->ms_publish_ring;
++   return radv_meta_mesh_draw_records(cmd_buffer, info->indirect_va, info->stride, info->count_va, info->count,
++                                      MAX2(mesh_shader->info.ms.prim_parts, 1),
++                                      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(ring) : 0, 0, 0, 0);
++}
++
++/* Emulated task shaders (radv_task_emulated). A task draw goes in chunks of up
++ * to the task rings' entries of task workgroups; for each, on the graphics
++ * ring:
++ *
++ * - the task shader as a compute dispatch, fed the graphics state, its
++ *   workgroups in one dimension from the chunk's first (radv_task_emu_block),
++ *   writing the task rings, which are ordinary buffers here
++ *   (radv_device.task_emu_bo), entries sized to its payload;
++ * - the draw records prepass, from the draw ring's entries to the chunk's mesh
++ *   draw records (radv_mesh_draw_record), whose index in the packet is its
++ *   task workgroup's ring entry;
++ * - the mesh workgroups' draw of those records.
++ *
++ * The next chunk waits for the mesh shaders, which read the rings. An indirect
++ * draw's chunks are counted in memory: all the chunks its task workgroup
++ * limit allows are recorded, those past its workgroups empty.
++ */
++struct radv_task_emu {
++   uint64_t rings_va; /* radv_task_emu_rings */
++   uint32_t entries;  /* task workgroups a chunk holds */
++   uint64_t records_va;
++   uint64_t draw_ring_va;
++};
++
++static bool
++radv_task_emu_begin(struct radv_cmd_buffer *cmd_buffer, struct radv_task_emu *emu)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_physical_device *pdev = radv_device_physical(device);
++   const struct radv_shader *task = cmd_buffer->state.shaders[MESA_SHADER_TASK];
++
++   if (!device->task_emu_bo) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_FEATURE_NOT_PRESENT);
++      return false;
++   }
++
++   const uint32_t stride = align(MAX2(task->info.cs.task_payload_size, 16), 16);
++   emu->entries = MIN2(RADV_TASK_EMU_MAX_ENTRIES, 1u << util_logbase2(RADV_TASK_EMU_PAYLOAD_BYTES / stride));
++
++   const uint64_t va = radv_buffer_get_va(device->task_emu_bo);
++   emu->records_va = va + RADV_TASK_EMU_RECORDS_OFFSET;
++   emu->draw_ring_va = va + RADV_TASK_EMU_DRAW_RING_OFFSET;
++
++   struct radv_task_emu_rings rings = {0};
++   ac_build_raw_buffer_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
++                                  emu->draw_ring_va, emu->entries * AC_TASK_DRAW_ENTRY_BYTES,
++                                  rings.descriptors[RING_TS_DRAW]);
++   ac_build_raw_buffer_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
++                                  va + RADV_TASK_EMU_PAYLOAD_OFFSET, emu->entries * stride,
++                                  rings.descriptors[RING_TS_PAYLOAD]);
++
++   unsigned offset;
++   if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(rings), &rings, &offset)) {
++      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return false;
++   }
++   emu->rings_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
++
++   radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, device->task_emu_bo);
++   return true;
++}
++
++/* A chunk's task shader dispatch: groups workgroups, or the workgroups at
++ * indirect_va. */
++static void
++radv_task_emu_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_task_emu *emu, uint64_t block_va,
++                       uint32_t groups, uint64_t indirect_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   const struct radv_physical_device *pdev = radv_device_physical(device);
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++   const struct radv_shader *shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
++
++   assert(pdev->info.gfx_level < GFX12);
++   radeon_check_space(device->ws, cs->b, 512);
++
++   cmd_buffer->queue_state.compute_scratch_size_per_wave_needed =
++      MAX2(cmd_buffer->queue_state.compute_scratch_size_per_wave_needed, shader->config.scratch_bytes_per_wave);
++   cmd_buffer->queue_state.compute_scratch_waves_wanted =
++      MAX2(cmd_buffer->queue_state.compute_scratch_waves_wanted,
++           radv_get_max_scratch_waves(device, (struct radv_shader *)shader));
++
++   radv_emit_compute_shader(pdev, cs, shader);
++   radv_emit_graphics_stage_for_compute(cmd_buffer, shader);
++
++   /* The compute state is the task shader's now: the next compute dispatch,
++    * the chunk's records prepass among them, emits its own again, even for
++    * the pipeline it last bound. */
++   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
++   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
++
++   radeon_begin(cs);
++   const uint32_t rings_loc = radv_get_user_sgpr_loc(shader, AC_UD_CS_TASK_RING_OFFSETS);
++   if (rings_loc) {
++      radeon_set_sh_reg_seq(rings_loc, 2);
++      radeon_emit(emu->rings_va);
++      radeon_emit(emu->rings_va >> 32);
++   }
++   const uint32_t entry_loc = radv_get_user_sgpr_loc(shader, AC_UD_TASK_RING_ENTRY);
++   if (entry_loc)
++      radeon_set_sh_reg(entry_loc, 0);
++   const uint32_t state_loc = radv_get_user_sgpr_loc(shader, AC_UD_TASK_STATE);
++   if (state_loc)
++      radeon_set_sh_reg(state_loc, radv_shader_query_none);
++   radeon_end();
++   radv_emit_userdata_address(device, cs, shader, AC_UD_CS_TASK_EMU, block_va);
++
++   /* The application's pipeline statistics count its own work, as around
++    * meta operations (radv_suspend_queries): not these compute invocations. */
++   const bool stats = radv_get_num_pipeline_stat_queries(cmd_buffer) > 0;
++   if (stats) {
++      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_START_PIPELINE_STATS;
++      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_STOP_PIPELINE_STATS;
++   }
++
++   radv_emit_cache_flush(cmd_buffer);
++
++   const struct radv_dispatch_info info = {
++      .blocks = {groups, 1, 1},
++      .indirect_va = indirect_va,
++   };
++   radv_emit_dispatch_packets(cmd_buffer, shader, &info);
++
++   /* The records prepass reads the draw ring. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_SCACHE;
++   if (stats) {
++      cmd_buffer->state.flush_bits &= ~RADV_CMD_FLAG_STOP_PIPELINE_STATS;
++      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_START_PIPELINE_STATS;
++   }
++}
++
++/* A chunk's mesh workgroups, from its draw ring's count entries or the count
++ * at count_va. */
++static void
++radv_task_emu_draw_chunk(struct radv_cmd_buffer *cmd_buffer, const struct radv_task_emu *emu, uint32_t draw_id,
++                         uint32_t count, uint64_t count_va)
++{
++   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
++   struct radv_cmd_stream *cs = cmd_buffer->cs;
++   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
++   const uint64_t publish_ring =
++      radv_ms_publishes(&mesh_shader->info) ? radv_buffer_get_va(device->ms_publish_ring) : 0;
++
++   radv_meta_mesh_draw_records(cmd_buffer, emu->draw_ring_va, AC_TASK_DRAW_ENTRY_BYTES, count_va, count,
++                               MAX2(mesh_shader->info.ms.prim_parts, 1), publish_ring, emu->records_va,
++                               (uint32_t)emu->rings_va, draw_id);
++   radv_emit_cache_flush(cmd_buffer);
++
++   radeon_check_space(device->ws, cs->b, 64);
++   radv_emit_indirect_buffer(cs, emu->records_va, false);
++   radv_emit_userdata_address(device, cs, mesh_shader, AC_UD_VS_MS_DRAW_RECORDS, emu->records_va);
++   radv_cs_emit_indirect_draw_packet(cmd_buffer, false, count, count_va, sizeof(struct radv_mesh_draw_record), true);
++
++   /* The next chunk writes the rings the mesh shaders read, and starts the
++    * publish ring from zero. */
++   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH;
++}
++
++/* The application's compute state comes back before its next dispatch. */
++static void
++radv_task_emu_end(struct radv_cmd_buffer *cmd_buffer)
++{
++   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
++   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
++   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
++}
++
++static void
++radv_task_emu_draw_direct(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint32_t z)
++{
++   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
++   const uint32_t view_mask = cmd_buffer->state.render.view_mask;
++   struct radv_task_emu emu;
++
++   if (!radv_task_emu_begin(cmd_buffer, &emu))
++      return;
++
++   const uint32_t workgroups = x * y * z;
++   u_foreach_bit (view, view_mask ? view_mask : 1) {
++      if (view_mask)
++         radv_emit_view_index(pdev, &cmd_buffer->state, cmd_buffer->cs, view);
++
++      for (uint32_t first = 0; first < workgroups; first += emu.entries) {
++         const uint32_t count = MIN2(emu.entries, workgroups - first);
++         const struct radv_task_emu_block block = {.grid = {x, y, z}, .first_workgroup = first};
++         unsigned offset;
++         if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(block), &block, &offset)) {
++            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++            return;
++         }
++         radv_task_emu_dispatch(cmd_buffer, &emu, radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset, count,
++                                0);
++         radv_task_emu_draw_chunk(cmd_buffer, &emu, 0, count, 0);
++      }
++   }
++   radv_task_emu_end(cmd_buffer);
++}
++
++static void
++radv_task_emu_draw_indirect(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info)
++{
++   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
++   const uint32_t view_mask = cmd_buffer->state.render.view_mask;
++   struct radv_task_emu emu;
++
++   if (!radv_task_emu_begin(cmd_buffer, &emu))
++      return;
++
++   /* Every chunk the task workgroup limit allows (maxTaskWorkGroupTotalCount),
++    * set up for a batch of draws at a time. */
++   const uint32_t chunks = DIV_ROUND_UP(1u << 22, emu.entries);
++   const uint32_t batch = MAX2(4096 / chunks, 1);
++
++   u_foreach_bit (view, view_mask ? view_mask : 1) {
++      if (view_mask)
++         radv_emit_view_index(pdev, &cmd_buffer->state, cmd_buffer->cs, view);
++
++      for (uint32_t first_draw = 0; first_draw < info->count; first_draw += batch) {
++         const uint32_t draws = MIN2(batch, info->count - first_draw);
++         unsigned offset;
++         if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, draws * chunks * 48, 16, &offset, NULL)) {
++            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++            return;
++         }
++         const uint64_t out_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
++         radv_meta_task_chunks(cmd_buffer, info->indirect_va, info->stride, info->count_va, first_draw, draws,
++                               chunks, emu.entries, out_va);
++
++         for (uint32_t i = 0; i < draws * chunks; i++) {
++            const uint64_t block_va = out_va + i * sizeof(struct radv_task_emu_block);
++            const uint64_t args_va = out_va + draws * chunks * sizeof(struct radv_task_emu_block) + i * 16;
++            radv_task_emu_dispatch(cmd_buffer, &emu, block_va, 0, args_va);
++            radv_task_emu_draw_chunk(cmd_buffer, &emu, first_draw + i / chunks, emu.entries, args_va);
++         }
++      }
++   }
++   radv_task_emu_end(cmd_buffer);
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z)
+ {
+@@ -15257,7 +15659,9 @@ radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y,
+    if (!radv_before_taskmesh_draw(cmd_buffer, &info, 1, false))
+       return;
+ 
+-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
++   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
++      radv_task_emu_draw_direct(cmd_buffer, x, y, z);
++   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+       radv_emit_direct_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, x, y, z);
+    } else {
+       radv_emit_direct_mesh_draw_packet(cmd_buffer, x, y, z);
+@@ -15304,11 +15708,19 @@ radv_CmdDrawMeshTasksIndirect2EXT(VkCommandBuffer commandBuffer, const VkDrawInd
+    info.indexed = false;
+    info.instance_count = 0;
+ 
++   const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
++   if (radv_mesh_draw_records_enabled(pdev) && !records_va && !cmd_buffer->state.shaders[MESA_SHADER_TASK])
++      return;
++
+    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->drawCount, false))
+       return;
+ 
+-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
++   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
++      radv_task_emu_draw_indirect(cmd_buffer, &info);
++   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+       radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info, 0);
++   } else if (records_va) {
++      radv_emit_mesh_draw_records_packets(pdev, cmd_buffer, &info, records_va);
+    } else {
+       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
+    }
+@@ -15359,10 +15771,16 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
+    info.indexed = false;
+    info.instance_count = 0;
+ 
++   const uint64_t records_va = radv_mesh_draw_records(cmd_buffer, &info);
++   if (radv_mesh_draw_records_enabled(pdev) && !records_va && !cmd_buffer->state.shaders[MESA_SHADER_TASK])
++      return;
++
+    if (!radv_before_taskmesh_draw(cmd_buffer, &info, pInfo->maxDrawCount, false))
+       return;
+ 
+-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
++   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK) && !cmd_buffer->gang.cs) {
++      radv_task_emu_draw_indirect(cmd_buffer, &info);
++   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+       uint64_t workaround_cond_va = 0;
+ 
+       if (pdev->info.has_taskmesh_indirect0_bug && info.count_va) {
+@@ -15380,6 +15798,8 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
+ 
+       radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info,
+                                                workaround_cond_va);
++   } else if (records_va) {
++      radv_emit_mesh_draw_records_packets(pdev, cmd_buffer, &info, records_va);
+    } else {
+       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
+    }
+diff --git a/src/amd/vulkan/radv_constants.h b/src/amd/vulkan/radv_constants.h
+index 9d3d9bc71e5..c57894c6984 100644
+--- a/src/amd/vulkan/radv_constants.h
++++ b/src/amd/vulkan/radv_constants.h
+@@ -60,6 +60,18 @@
+ #define RING_HS_TESS_OFFCHIP     6
+ #define RING_TS_DRAW             7
+ #define RING_TS_PAYLOAD          8
++
++/* Emulated task shaders' memory (radv_device.task_emu_bo): a chunk of up to
++ * RADV_TASK_EMU_MAX_ENTRIES task workgroups at a time, their mesh draw
++ * records (64 bytes each), their task draw ring entries (16 bytes each) and
++ * their payloads, as many as fit RADV_TASK_EMU_PAYLOAD_BYTES at the
++ * pipeline's payload size. */
++#define RADV_TASK_EMU_MAX_ENTRIES      65536u
++#define RADV_TASK_EMU_PAYLOAD_BYTES    (64u << 20)
++#define RADV_TASK_EMU_RECORDS_OFFSET   0u
++#define RADV_TASK_EMU_DRAW_RING_OFFSET (RADV_TASK_EMU_MAX_ENTRIES * 64u)
++#define RADV_TASK_EMU_PAYLOAD_OFFSET   (RADV_TASK_EMU_DRAW_RING_OFFSET + RADV_TASK_EMU_MAX_ENTRIES * 16u)
++#define RADV_TASK_EMU_BYTES            (RADV_TASK_EMU_PAYLOAD_OFFSET + RADV_TASK_EMU_PAYLOAD_BYTES)
+ #define RING_MS_SCRATCH          9
+ #define RING_PS_ATTR             10
+ #define RING_PS_SAMPLE_POSITIONS 11
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index 23b61fa72c2..1e304230192 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -1230,6 +1230,8 @@ radv_device_init_compiler_info(struct radv_device *device)
+             .no_implicit_varying_subgroup_size = instance->drirc.debug.no_implicit_varying_subgroup_size,
+             .force_nan_preserve_min_max = instance->drirc.debug.force_nan_preserve_min_max,
+             .nir_debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
++            .mesh_draw_records = radv_mesh_draw_records_enabled(pdev),
++            .task_emulation = radv_task_emulated(pdev),
+             .force_aniso = device->force_aniso,
+             /* Use CHIP_UNKNOWN for increased compatiblity between caches. */
+             .family = pdev->use_llvm ? pdev->info.family : CHIP_UNKNOWN,
+@@ -1355,6 +1357,16 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
+       radv_bo_destroy(device, NULL, device->zero_bo);
+    }
+ 
++   if (device->ms_publish_ring) {
++      device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, false);
++      radv_bo_destroy(device, NULL, device->ms_publish_ring);
++   }
++
++   if (device->task_emu_bo) {
++      device->ws->buffer_make_resident(device->ws, device->task_emu_bo, false);
++      radv_bo_destroy(device, NULL, device->task_emu_bo);
++   }
++
+    if (device->gfx_init)
+       radv_bo_destroy(device, NULL, device->gfx_init);
+ 
+@@ -1684,6 +1696,35 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+          goto fail;
+    }
+ 
++   /* Zeroed, as every draw packet leaves it; its address goes in a record's
++    * 32 bits. */
++   if (device->vk.enabled_features.meshShader && radv_mesh_draw_records_enabled(pdev) &&
++       !pdev->info.compiler_info.has_ngg_per_prim_params) {
++      result = radv_bo_create(device, NULL, AC_MS_PUBLISH_RING_BYTES, 4096, RADEON_DOMAIN_VRAM,
++                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM |
++                                 RADEON_FLAG_32BIT,
++                              RADV_BO_PRIORITY_SCRATCH, 0, true, &device->ms_publish_ring);
++      if (result != VK_SUCCESS)
++         goto fail;
++
++      result = device->ws->buffer_make_resident(device->ws, device->ms_publish_ring, true);
++      if (result != VK_SUCCESS)
++         goto fail;
++   }
++
++   /* Its records are read through a 32-bit address. */
++   if (device->vk.enabled_features.taskShader && radv_task_emulated(pdev)) {
++      result = radv_bo_create(device, NULL, RADV_TASK_EMU_BYTES, 4096, RADEON_DOMAIN_VRAM,
++                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT,
++                              RADV_BO_PRIORITY_SCRATCH, 0, true, &device->task_emu_bo);
++      if (result != VK_SUCCESS)
++         goto fail;
++
++      result = device->ws->buffer_make_resident(device->ws, device->task_emu_bo, true);
++      if (result != VK_SUCCESS)
++         goto fail;
++   }
++
+    if (pdev->info.has_graphics && !(instance->debug_flags & RADV_DEBUG_NO_IB_CHAINING))
+       radv_create_gfx_preamble(device);
+ 
+diff --git a/src/amd/vulkan/radv_device.h b/src/amd/vulkan/radv_device.h
+index bbd1e11464f..2b0c5d6c880 100644
+--- a/src/amd/vulkan/radv_device.h
++++ b/src/amd/vulkan/radv_device.h
+@@ -174,6 +174,15 @@ struct radv_device {
+    struct radeon_winsys_bo *gfx_init;
+    struct radeon_winsys_bo *zero_bo;
+ 
++   /* The ring mesh shaders publish their outputs in when a workgroup's
++    * primitives go out in parts (radv_ms_publishes, AC_MS_PUBLISH_RING_BYTES). */
++   struct radeon_winsys_bo *ms_publish_ring;
++
++   /* Emulated task shaders' memory (radv_task_emulated): a chunk's mesh draw
++    * records, its task draw ring and its task payload ring, one chunk at a
++    * time (RADV_TASK_EMU_*). */
++   struct radeon_winsys_bo *task_emu_bo;
++
+    struct radeon_winsys_bo *trace_bo;
+    struct radv_trace_data *trace_data;
+ 
+diff --git a/src/amd/vulkan/radv_gs_compute.c b/src/amd/vulkan/radv_gs_compute.c
+index 91a7e7c1fc7..da9c53edd3d 100644
+--- a/src/amd/vulkan/radv_gs_compute.c
++++ b/src/amd/vulkan/radv_gs_compute.c
+@@ -326,8 +326,10 @@ radv_gs_compute_split(const struct radv_compiler_info *compiler_info, struct rad
+    nir_shader *const rast = radv_gs_compute_split_gs(gs_stage->nir, &gs_stage->key, out);
+ 
+    /* The pipeline's hardware vertex shader is the rasterization copy; there is
+-    * no hardware geometry shader, and no hardware tessellation. */
++    * no hardware geometry shader, and no hardware tessellation. The copy runs
++    * the geometry shader again, with its dynamic buffers. */
+    vs_stage->nir = rast;
++   vs_stage->layout.use_dynamic_descriptors |= gs_stage->layout.use_dynamic_descriptors;
+    vs_stage->next_stage = MESA_SHADER_FRAGMENT;
+    gs_stage->nir = NULL;
+    gs_stage->stage = MESA_SHADER_NONE;
+@@ -571,6 +573,11 @@ radv_gs_compute_compile(const struct radv_compiler_info *compiler_info, const st
+    radv_nir_shader_info_pass(compiler_info, nir, &stage.layout, &stage.key, NULL, RADV_PIPELINE_COMPUTE, false,
+                              &stage.info);
+    stage.info.gs_compute = kind;
++   /* A graphics stage still, whose dynamic buffers' offsets come as a
++    * graphics stage's do with independent sets (radv_nir_lower_descriptors),
++    * which the pass above only gives graphics stages. */
++   if (stage.info.loads_dynamic_offsets && stage.layout.independent_sets)
++      stage.info.loads_dynamic_descriptors_offset_addr = true;
+    if (kind == RADV_GS_COMPUTE_VS)
+       stage.info.vs = vs_info.vs;
+ 
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 5b09417ae50..e9fa9530d15 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -69,6 +69,12 @@ radv_perf_query_supported(const struct radv_physical_device *pdev)
+           !(instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
+ }
+ 
++bool
++radv_task_emulated(const struct radv_physical_device *pdev)
++{
++   return radv_mesh_draw_records_enabled(pdev) && !radv_compute_queue_enabled(pdev);
++}
++
+ static bool
+ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
+ {
+@@ -77,7 +83,28 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
+    if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
+       return false;
+ 
+-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
++   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 &&
++          (radv_compute_queue_enabled(pdev) || radv_task_emulated(pdev));
++}
++
++/* Mesh shaders without task shaders (RADV_PS5_MESH), for a device with
++ * neither RADV's task path nor its emulation (radv_task_emulated). Without
++ * per-primitive parameters a workgroup's primitives go out in parts, the
++ * first publishing what the others export (ac_nir_lower_ngg_mesh).
++ * VK_EXT_mesh_shader requires taskShader as well as meshShader
++ * (dEQP-VK.info.device_mandatory_features), so this stays an experiment.
++ */
++static bool
++radv_mesh_enabled(const struct radv_physical_device *pdev)
++{
++   const struct radv_instance *instance = radv_physical_device_instance(pdev);
++
++   if (radv_taskmesh_enabled(pdev))
++      return true;
++   if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
++      return false;
++   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 &&
++          debug_get_bool_option("RADV_PS5_MESH", false);
+ }
+ 
+ bool
+@@ -914,7 +941,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+       .EXT_map_memory_placed = true,
+       .EXT_memory_budget = true,
+       .EXT_memory_priority = true,
+-      .EXT_mesh_shader = radv_taskmesh_enabled(pdev),
++      .EXT_mesh_shader = radv_mesh_enabled(pdev),
+       .EXT_multi_draw = true,
+       .EXT_multisampled_render_to_single_sampled = radv_msrtss_enabled(pdev),
+       .EXT_mutable_descriptor_type = true, /* Trivial promotion from VALVE. */
+@@ -1372,9 +1399,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .minLod = true,
+ 
+       /* VK_EXT_mesh_shader */
+-      .meshShader = taskmesh_en,
++      .meshShader = radv_mesh_enabled(pdev),
+       .taskShader = taskmesh_en,
+-      .multiviewMeshShader = taskmesh_en,
++      .multiviewMeshShader = radv_mesh_enabled(pdev),
+       .primitiveFragmentShadingRateMeshShader = taskmesh_en && pdev->info.has_vrs,
+       .meshShaderQueries = false,
+ 
+@@ -1806,7 +1833,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+    const bool enable_sparse = radv_sparse_enabled(pdev);
+ 
+    VkShaderStageFlags taskmesh_stages =
+-      radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
++      (radv_mesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT : 0) |
++      (radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
+    VkShaderStageFlags rt_stages = radv_rt_pipelines_enabled(pdev) ? RADV_RT_STAGE_BITS : 0;
+ 
+    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
+@@ -2364,7 +2392,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .pipelineBinaryCompressedData = false,
+ 
+       /* VK_KHR_compute_shader_derivatives */
+-      .meshAndTaskShaderDerivatives = radv_taskmesh_enabled(pdev),
++      .meshAndTaskShaderDerivatives = radv_mesh_enabled(pdev),
+ 
+       /* VK_EXT_device_generated_commands */
+       .maxIndirectPipelineCount = 4096,
+diff --git a/src/amd/vulkan/radv_physical_device.h b/src/amd/vulkan/radv_physical_device.h
+index 6d1be8616bb..a9973fa3672 100644
+--- a/src/amd/vulkan/radv_physical_device.h
++++ b/src/amd/vulkan/radv_physical_device.h
+@@ -241,6 +241,17 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
+           radv_sparse_enabled(pdev);
+ }
+ 
++/* Without DISPATCH_MESH_INDIRECT_MULTI, mesh shaders without task shaders
++ * launch through ordinary draws, direct or indirect: each draw's workgroup
++ * count lives in a record in memory that the mesh shader reads by draw ID
++ * (radv_mesh_draw_record), which a compute pass writes from the application's
++ * indirect commands. */
++static inline bool
++radv_mesh_draw_records_enabled(const struct radv_physical_device *pdev)
++{
++   return pdev->info.gfx_level == GFX10_3 && !pdev->info.has_dispatch_mesh_indirect;
++}
++
+ static inline bool
+ radv_has_shader_buffer_float_minmax(const struct radv_physical_device *pdev, unsigned bitsize)
+ {
+@@ -303,6 +314,14 @@ bool radv_transfer_queue_enabled(const struct radv_physical_device *pdev);
+ 
+ bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
+ 
++/* Task shaders without the compute ring RADV runs them on (the PS5, which also
++ * lacks the CP's task and mesh dispatch packets): each task draw becomes, in
++ * chunks, a compute dispatch of the task shader on the graphics ring writing
++ * the task rings as ordinary buffers, the draw records of its mesh workgroups
++ * (radv_mesh_draw_records_enabled) and their draw (radv_cmd_buffer.c,
++ * radv_task_emulation). */
++bool radv_task_emulated(const struct radv_physical_device *pdev);
++
+ bool radv_spm_trace_enabled(const struct radv_physical_device *pdev);
+ 
+ bool radv_tmz_enabled(const struct radv_physical_device *pdev);
+diff --git a/src/amd/vulkan/radv_pipeline.c b/src/amd/vulkan/radv_pipeline.c
+index 7ee823145a2..e4731f3d752 100644
+--- a/src/amd/vulkan/radv_pipeline.c
++++ b/src/amd/vulkan/radv_pipeline.c
+@@ -503,6 +503,10 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+ 
+    NIR_PASS(_, stage->nir, nir_opt_idiv_const, 8);
+ 
++   /* Before the division lowering: an emulated task shader's workgroup ID
++    * divides by the grid. */
++   NIR_PASS(_, stage->nir, radv_nir_lower_mesh_draw_records, stage, compiler_info->hw.address32_hi);
++
+    NIR_PASS(_, stage->nir, nir_lower_idiv,
+             &(nir_lower_idiv_options){
+                .allow_fp16 = gfx_level >= GFX9,
+diff --git a/src/amd/vulkan/radv_shader.c b/src/amd/vulkan/radv_shader.c
+index 4867cb23f93..2818119291f 100644
+--- a/src/amd/vulkan/radv_shader.c
++++ b/src/amd/vulkan/radv_shader.c
+@@ -1034,6 +1034,8 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
+       options.has_gen_prim_query = info->ms.has_query;
+       options.has_ms_gs_invocations_query = info->ms.has_query;
+       options.multiview = gfx_state->has_multiview_view_index;
++      options.ms_prim_parts = info->ms.prim_parts;
++      options.ms_publish = radv_ms_publishes(info);
+ 
+       bool scratch_ring = false;
+       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &options, &scratch_ring);
+diff --git a/src/amd/vulkan/radv_shader.h b/src/amd/vulkan/radv_shader.h
+index 8851a9ca046..5e87f0c5c22 100644
+--- a/src/amd/vulkan/radv_shader.h
++++ b/src/amd/vulkan/radv_shader.h
+@@ -276,6 +276,50 @@ struct radv_shader_layout {
+    const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping;
+ };
+ 
++/* A mesh shader draw's record when there is no DISPATCH_MESH_INDIRECT_MULTI
++ * (radv_mesh_draw_records_enabled): the ordinary draw launching the draw's
++ * workgroups (a vertex each, a part each with radv_shader_info.ms.prim_parts),
++ * then the workgroup count the shader reads by draw ID. A shader publishing
++ * its outputs (radv_ms_publishes) also reads the ring's address and the
++ * packet's workgroups from the first record, and the draw's first workgroup
++ * among them from its own.
++ */
++struct radv_mesh_draw_record {
++   uint32_t vertex_count;
++   uint32_t instance_count;
++   uint32_t first_vertex;
++   uint32_t first_instance;
++   uint32_t grid[3];
++   uint32_t publish_ring; /* the low 32 bits: it is in the 32-bit window */
++   uint64_t first_workgroup;
++   uint64_t workgroups;
++   /* With emulated task shaders (radv_task_emulated): the first record's task
++    * ring table (radv_task_emu_rings, in the 32-bit window), and each record's
++    * task draw, which the mesh shader reads as its draw ID. The record's index
++    * in its packet is its task workgroup's ring entry. */
++   uint32_t task_rings;
++   uint32_t task_draw_id;
++   uint32_t pad[2];
++};
++
++/* An emulated task draw's chunk (radv_task_emulated), which its task shader
++ * reads: the task workgroup grid, the draw's index, and the first of the
++ * draw's task workgroups in this chunk, in x, then y, then z order. The chunk
++ * dispatches its workgroups in one dimension. */
++struct radv_task_emu_block {
++   uint32_t grid[3];
++   uint32_t draw_id;
++   uint32_t first_workgroup;
++   uint32_t pad[3];
++};
++
++/* The task rings of an emulated task draw (radv_task_emulated): the ring
++ * table the shaders read RING_TS_DRAW and RING_TS_PAYLOAD from, entries sized
++ * to the pipeline's payload. */
++struct radv_task_emu_rings {
++   uint32_t descriptors[RING_TS_PAYLOAD + 1][4];
++};
++
+ struct radv_shader_stage {
+    mesa_shader_stage stage;
+    mesa_shader_stage next_stage;
+@@ -571,7 +615,9 @@ struct radv_compiler_info {
+       uint32_t no_implicit_varying_subgroup_size : 1;
+       uint32_t force_nan_preserve_min_max : 1;
+       uint32_t nir_debug_info : 1;
+-      uint32_t padding : 27;
++      uint32_t mesh_draw_records : 1;
++      uint32_t task_emulation : 1;
++      uint32_t padding : 25;
+ 
+       int32_t force_aniso;
+ 
+diff --git a/src/amd/vulkan/radv_shader_args.c b/src/amd/vulkan/radv_shader_args.c
+index 57192631d6e..233dbbe8b0b 100644
+--- a/src/amd/vulkan/radv_shader_args.c
++++ b/src/amd/vulkan/radv_shader_args.c
+@@ -309,8 +309,21 @@ declare_tes_input_vgprs(struct radv_shader_args_state *state)
+ }
+ 
+ static void
+-declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_shader_info *info)
++declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_compiler_info *compiler_info,
++                       const struct radv_shader_info *info)
+ {
++   if (compiler_info->key.mesh_draw_records) {
++      /* Launched by DRAW_INDIRECT_MULTI as well, which writes the first
++       * vertex (always 0) and the draw ID here.
++       */
++      RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.base_vertex, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
++      if (info->vs.needs_draw_id)
++         RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.draw_id, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
++      if (info->ms.draw_records)
++         RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, ms_draw_records, AC_UD_VS_MS_DRAW_RECORDS);
++      return;
++   }
++
+    if (info->cs.uses_grid_size) {
+       RADV_ADD_UD_ARG(state, 3, AC_ARG_VALUE, ac.num_work_groups, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
+    }
+@@ -649,6 +662,8 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
+ 
+       if (stage == MESA_SHADER_TASK) {
+          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.task_ring_entry, AC_UD_TASK_RING_ENTRY);
++         if (compiler_info->key.task_emulation)
++            RADV_ADD_UD_ARG(state, 1, AC_ARG_CONST_ADDR, task_emu, AC_UD_CS_TASK_EMU);
+ 
+          if (has_shader_query) {
+             RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, task_state, AC_UD_TASK_STATE);
+@@ -818,7 +833,7 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
+             if (previous_stage == MESA_SHADER_VERTEX) {
+                declare_vs_specific_input_sgprs(state, info);
+             } else if (previous_stage == MESA_SHADER_MESH) {
+-               declare_ms_input_sgprs(state, info);
++               declare_ms_input_sgprs(state, compiler_info, info);
+             }
+ 
+             declare_global_input_sgprs(state, gfx_level, info, user_sgpr_info);
+diff --git a/src/amd/vulkan/radv_shader_args.h b/src/amd/vulkan/radv_shader_args.h
+index 0d32c79f285..d765cfefc61 100644
+--- a/src/amd/vulkan/radv_shader_args.h
++++ b/src/amd/vulkan/radv_shader_args.h
+@@ -39,6 +39,7 @@ enum radv_ud_index {
+    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
+    AC_UD_VS_PROLOG_INPUTS,
+    AC_UD_VS_GS_COMPUTE_DRAW, /* radv_gs_compute.h: the rasterization VS's draw block */
++   AC_UD_VS_MS_DRAW_RECORDS, /* radv_mesh_draw_record: a mesh shader's */
+    AC_UD_VS_MAX_UD,
+    AC_UD_PS_STATE,
+    AC_UD_PS_MAX_UD,
+@@ -52,6 +53,7 @@ enum radv_ud_index {
+    AC_UD_CS_TASK_IB,
+    AC_UD_CS_GS_COMPUTE_DRAW,           /* radv_gs_compute.h: the draw block */
+    AC_UD_CS_GS_COMPUTE_VERTEX_BUFFERS, /* and the vertex shader's vertex buffers */
++   AC_UD_CS_TASK_EMU,                  /* radv_task_emu_block: an emulated task draw's chunk */
+    AC_UD_CS_MAX_UD,
+    AC_UD_GS_MAX_UD,
+    AC_UD_TCS_OFFCHIP_LAYOUT = AC_UD_VS_MAX_UD,
+@@ -82,6 +84,12 @@ struct radv_shader_args {
+    /* radv_gs_compute.h: the per-draw block of a geometry shader run as compute. */
+    struct ac_arg gs_compute_draw;
+ 
++   /* A mesh shader's draw records (radv_mesh_draw_record). */
++   struct ac_arg ms_draw_records;
++
++   /* An emulated task shader's chunk (radv_task_emu_block). */
++   struct ac_arg task_emu;
++
+    struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
+ 
+    /* Streamout */
+diff --git a/src/amd/vulkan/radv_shader_info.c b/src/amd/vulkan/radv_shader_info.c
+index 968c98cd67a..4fc5f6e350e 100644
+--- a/src/amd/vulkan/radv_shader_info.c
++++ b/src/amd/vulkan/radv_shader_info.c
+@@ -414,6 +414,26 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
+       *per_prim_mask |= VARYING_BIT_LAYER;
+ }
+ 
++/* A mesh shader's per-primitive outputs on a GPU without per-primitive
++ * parameters (GFX10.1's parameter cache, which the PS5 has): each primitive
++ * gets vertices of its own and its outputs go per vertex, in as many parts as
++ * one NGG subgroup's 256 vertices need. */
++static unsigned
++radv_ms_prim_parts(const struct ac_compiler_info *ac, const struct nir_shader *nir,
++                   const struct radv_graphics_state_key *gfx_state)
++{
++   if (nir->info.stage != MESA_SHADER_MESH || ac->has_ngg_per_prim_params)
++      return 0;
++
++   uint64_t per_vtx_mask, per_prim_mask;
++   radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
++   if (!per_prim_mask)
++      return 0;
++
++   const unsigned vertices_per_prim = mesa_vertices_per_prim(nir->info.mesh.primitive_type);
++   return MAX2(DIV_ROUND_UP(nir->info.mesh.max_primitives_out * vertices_per_prim, 256), 1);
++}
++
+ static void
+ radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_shader *nir,
+                          const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
+@@ -474,6 +494,10 @@ radv_set_vs_output_param(const struct ac_compiler_info *ac, const struct nir_sha
+    /* Per-primitive outputs: the HW needs these to be last. */
+    assign_outinfo_params(outinfo, per_prim_mask, &total_param_exports, extra_offset);
+ 
++   /* Without per-primitive parameters they are per-vertex ones, still last. */
++   if (radv_ms_prim_parts(ac, nir, gfx_state))
++      outinfo->param_exports = total_param_exports;
++
+    outinfo->prim_param_exports = total_param_exports - outinfo->param_exports;
+ }
+ 
+@@ -765,6 +789,13 @@ gather_shader_info_mesh(const struct radv_compiler_info *compiler_info, const ni
+    ngg_info->max_vert_out_per_gs_instance = false;
+    ngg_info->ngg_emit_size = 0;
+    ngg_info->prim_amp_factor = nir->info.mesh.max_primitives_out;
++
++   /* A part's primitives, on vertices of their own. */
++   if (info->ms.prim_parts) {
++      const unsigned part_prims = DIV_ROUND_UP(nir->info.mesh.max_primitives_out, info->ms.prim_parts);
++      ngg_info->max_out_verts = part_prims * mesa_vertices_per_prim(nir->info.mesh.primitive_type);
++      ngg_info->prim_amp_factor = part_prims;
++   }
+    ngg_info->vgt_esgs_ring_itemsize = 1;
+ 
+    info->ms.has_query = compiler_info->key.mesh_shader_queries;
+@@ -915,11 +946,16 @@ gather_shader_info_task(const struct radv_compiler_info *compiler_info, const ni
+     * use them.
+     */
+ 
+-   /* Needed to address the task draw/payload rings. */
++   /* Needed to address the task draw/payload rings. Emulated, the task
++    * workgroups of a chunk are dispatched in one dimension, and their grid and
++    * draw come from the chunk's block (radv_task_emu_block). */
+    info->cs.uses_block_id[0] = true;
+-   info->cs.uses_block_id[1] = true;
+-   info->cs.uses_block_id[2] = true;
+-   info->cs.uses_grid_size = true;
++   info->cs.uses_block_id[1] = !compiler_info->key.task_emulation;
++   info->cs.uses_block_id[2] = !compiler_info->key.task_emulation;
++   info->cs.uses_grid_size = !compiler_info->key.task_emulation;
++   info->cs.task_payload_size = nir->info.task_payload_size;
++   if (compiler_info->key.task_emulation)
++      info->vs.needs_draw_id = false;
+ 
+    /* Needed for storing draw ready only on the 1st thread. */
+    info->cs.uses_local_invocation_idx = true;
+@@ -1072,6 +1108,18 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const
+       outinfo->writes_layer_per_primitive = per_prim_mask & VARYING_BIT_LAYER;
+       outinfo->writes_primitive_shading_rate_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_SHADING_RATE;
+       outinfo->export_prim_id_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_ID;
++
++      /* Without per-primitive parameters, on vertices of their own. */
++      if (nir->info.stage == MESA_SHADER_MESH)
++         info->ms.prim_parts = radv_ms_prim_parts(compiler_info->ac, nir, gfx_state);
++      if (nir->info.stage == MESA_SHADER_MESH && info->ms.prim_parts) {
++         outinfo->writes_viewport_index |= outinfo->writes_viewport_index_per_primitive;
++         outinfo->writes_layer |= outinfo->writes_layer_per_primitive;
++         outinfo->export_prim_id |= outinfo->export_prim_id_per_primitive;
++         outinfo->writes_viewport_index_per_primitive = false;
++         outinfo->writes_layer_per_primitive = false;
++         outinfo->export_prim_id_per_primitive = false;
++      }
+    }
+ 
+    info->vs.needs_draw_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
+@@ -1081,9 +1129,18 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const
+    info->uses_invocation_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INVOCATION_ID);
+    info->uses_prim_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
+ 
+-   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11. */
++   /* Used by compute and mesh shaders. Mesh shaders must always declare this before GFX11, where
++    * DISPATCH_MESH_INDIRECT_MULTI writes it, but for draw records.
++    */
+    info->cs.uses_grid_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS) ||
+-                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11);
++                             (nir->info.stage == MESA_SHADER_MESH && compiler_info->ac->gfx_level < GFX11 &&
++                              !compiler_info->key.mesh_draw_records);
++   if (nir->info.stage == MESA_SHADER_MESH && compiler_info->key.mesh_draw_records &&
++       (info->cs.uses_grid_size || info->ms.prim_parts > 1 || stage_key->has_task_shader)) {
++      /* A draw's record is found by its draw ID. */
++      info->ms.draw_records = true;
++      info->vs.needs_draw_id = true;
++   }
+    info->cs.uses_local_invocation_idx = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_LOCAL_INVOCATION_INDEX) |
+                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SUBGROUP_ID) |
+                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS) |
+diff --git a/src/amd/vulkan/radv_shader_info.h b/src/amd/vulkan/radv_shader_info.h
+index 0a0247f5e85..fcc5b7ace8f 100644
+--- a/src/amd/vulkan/radv_shader_info.h
++++ b/src/amd/vulkan/radv_shader_info.h
+@@ -248,6 +248,10 @@ struct radv_shader_info {
+       bool has_query : 1; /* Task shader only */
+ 
+       uint32_t derivative_group : 2;
++
++      /* Task shader only: its payload's bytes, which size an emulated task
++       * draw's rings (radv_task_emulated). */
++      uint32_t task_payload_size;
+    } cs;
+    struct {
+       ac_nir_tess_io_info io_info;
+@@ -266,6 +270,14 @@ struct radv_shader_info {
+       bool needs_ms_scratch_ring;
+       bool has_task; /* If mesh shader is used together with a task shader. */
+       bool has_query;
++      /* Without per-primitive parameters, the parts a workgroup exports its
++       * primitives in, each on vertices of its own (ac_nir_lower_ngg_options
++       * ms_prim_parts); 0 with them. */
++      uint8_t prim_parts;
++      /* The workgroup count comes from the draw's record in memory
++       * (radv_mesh_draw_record), not user SGPRs; so does what a shader that
++       * publishes its outputs needs (radv_ms_publishes). */
++      bool draw_records;
+    } ms;
+ 
+    struct radv_streamout_info so;
+@@ -373,4 +385,13 @@ uint64_t radv_gather_unlinked_io_mask(const uint64_t nir_mask);
+ 
+ uint64_t radv_gather_unlinked_patch_io_mask(const uint64_t nir_io_mask, const uint32_t nir_patch_io_mask);
+ 
++/* A mesh shader whose parts take the first part's outputs from the publish
++ * ring (ac_nir_lower_ngg_options.ms_publish) instead of running the API
++ * workgroup again each. */
++static inline bool
++radv_ms_publishes(const struct radv_shader_info *info)
++{
++   return info->ms.prim_parts > 1 && info->ms.draw_records;
++}
++
+ #endif /* RADV_SHADER_INFO_H */
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 66a314f2691..bb07cd380d3 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -331,6 +331,12 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+     * ps5platform/videoout.h). */
+    info->has_fixed_display_swizzle = true;
+    info->display_swizzle_mode = ADDR_SW_64KB_R_X;
++   /* Every indirect mesh draw stopped the CP with a bad opcode at
++    * DISPATCH_MESH_INDIRECT_MULTI (dEQP-VK.mesh_shader.ext.api.draw_indirect*,
++    * run mesh-exp-1 in PS5_Vulkan); direct mesh draws, DRAW_INDEX_AUTO in
++    * fast launch, run. Indirect ones go through ordinary indirect draws
++    * (radv_mesh_draw_records_enabled). */
++   info->has_dispatch_mesh_indirect = false;
+    /* No exported function holds the GPU at a stable power state
+     * (radv_ps5_ctx_set_pstate refuses every state but none), so the profiling
+     * lock VK_KHR_performance_query takes always failed
+diff --git a/src/compiler/nir/nir_divergence_analysis.c b/src/compiler/nir/nir_divergence_analysis.c
+index 5f236004c3b..8712e7ab7c2 100644
+--- a/src/compiler/nir/nir_divergence_analysis.c
++++ b/src/compiler/nir/nir_divergence_analysis.c
+@@ -285,6 +285,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
+    case nir_intrinsic_load_ring_tess_offchip_offset_amd:
+    case nir_intrinsic_load_ring_mesh_scratch_amd:
+    case nir_intrinsic_load_ring_mesh_scratch_offset_amd:
++   case nir_intrinsic_load_ms_publish_ring_amd:
++   case nir_intrinsic_load_ms_publish_first_workgroup_amd:
++   case nir_intrinsic_load_ms_publish_workgroups_amd:
+    case nir_intrinsic_load_ring_esgs_amd:
+    case nir_intrinsic_load_ring_es2gs_offset_amd:
+    case nir_intrinsic_load_ring_task_draw_amd:
+diff --git a/src/compiler/nir/nir_intrinsics.py b/src/compiler/nir/nir_intrinsics.py
+index aaa18f7c04c..92b84586a9f 100644
+--- a/src/compiler/nir/nir_intrinsics.py
++++ b/src/compiler/nir/nir_intrinsics.py
+@@ -2011,6 +2011,12 @@ system_value("ring_task_payload_amd", 4)
+ # Address of the mesh shader scratch ring (used for excess mesh shader outputs)
+ system_value("ring_mesh_scratch_amd", 4)
+ system_value("ring_mesh_scratch_offset_amd", 1)
++# A mesh shader's published outputs (ac_nir_lower_ngg_options.ms_publish): the
++# ring's address, the draw's first workgroup among its draw packet's, and the
++# packet's workgroups.
++system_value("ms_publish_ring_amd", 1, bit_sizes=[64])
++system_value("ms_publish_first_workgroup_amd", 1, bit_sizes=[64])
++system_value("ms_publish_workgroups_amd", 1, bit_sizes=[64])
+ # Pointer into the draw and payload rings
+ system_value("task_ring_entry_amd", 1)
+ # Descriptor where NGG attributes are stored on GFX11.

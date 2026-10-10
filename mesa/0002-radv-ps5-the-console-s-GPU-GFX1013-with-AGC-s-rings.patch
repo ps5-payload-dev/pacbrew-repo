@@ -1,0 +1,578 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mihawk <163614687+mihawk-99@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 07:20:34 +0000
+Subject: [PATCH] radv/ps5: the console's GPU, GFX1013 with AGC's rings
+
+From mihawk-99/PS5_Mesa, squashed:
+
+  c801d0ee5f3 radv: host image copy follows the swizzles, not the GFX level
+  c6f7cd8c72c radv/ps5: tessellation through AGC's factor ring; no NGG culling
+  d06cb387ac3 radv/ps5: no integer dot-product instructions
+  be96316fa5a radv/ps5: AGC's off-chip parameter; no legacy geometry shaders
+  fb301d92c1f radv/ps5: keep separately compiled geometry shader objects on NGG
+  65659b7f623 amd/addrlib: copy by microblock only where a microblock is 256 contiguous bytes
+  64f2d2a04a7 radv: host image copy on GFX10
+  e181b948876 radv/ps5: the GPU has GFX1013's TC-compatible HTILE clear bug
+  05839d9141d radv/ps5: no device-generated commands
+---
+ src/amd/addrlib/src/core/addrswizzler.cpp     | 51 ++++++++++++++-----
+ src/amd/addrlib/src/core/addrswizzler.h       |  4 ++
+ src/amd/common/ac_gpu_info.c                  |  4 ++
+ src/amd/common/ac_gpu_info.h                  |  6 +++
+ src/amd/vulkan/radv_device.c                  |  1 +
+ src/amd/vulkan/radv_physical_device.c         | 18 +++----
+ src/amd/vulkan/radv_pipeline_graphics.c       | 23 ++++++++-
+ src/amd/vulkan/radv_queue.c                   |  8 +++
+ src/amd/vulkan/radv_radeon_winsys.h           |  5 ++
+ src/amd/vulkan/radv_shader.h                  |  3 +-
+ src/amd/vulkan/radv_shader_info.c             |  3 ++
+ src/amd/vulkan/winsys/ps5/radv_ps5_cs.c       | 24 ++++++++-
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.c | 28 ++++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_platform.h |  6 +++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c   | 32 ++++++++++++
+ src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h   |  9 ++++
+ 16 files changed, 198 insertions(+), 27 deletions(-)
+
+diff --git a/src/amd/addrlib/src/core/addrswizzler.cpp b/src/amd/addrlib/src/core/addrswizzler.cpp
+index 19e7d212bb1..e2ce7256e4e 100644
+--- a/src/amd/addrlib/src/core/addrswizzler.cpp
++++ b/src/amd/addrlib/src/core/addrswizzler.cpp
+@@ -40,6 +40,8 @@ LutAddresser::LutAddresser()
+     m_sLutMask(0),
+     m_blockBits(0),
+     m_blockSize(),
++    m_microBlockSize(),
++    m_microBlocksClean(FALSE),
+     m_bpeLog2(0),
+     m_bit(),
+     m_lutData()
+@@ -100,22 +102,40 @@ void LutAddresser::InitSwizzleProps()
+         m_sLutMask |= m_bit[i].s;
+     }
+ 
+-    // Derive the microblock size from the swizzle equation.
++    // Derive the microblock size from the swizzle equation: the rectangle of the coordinate bits the
++    // bottom 8 bits (256B) are formed from, as far as they are the low bits of each coordinate.
+     UINT_32 xMbMask = 0;
+     UINT_32 yMbMask = 0;
+     UINT_32 zMbMask = 0;
++    UINT_32 sMbMask = 0;
+     for (UINT_32 i = 0; i < 8; i++)
+     {
+         xMbMask |= m_bit[i].x;
+         yMbMask |= m_bit[i].y;
+         zMbMask |= m_bit[i].z;
++        sMbMask |= m_bit[i].s;
++    }
++    m_microBlockSize.width  = (xMbMask + 1) & ~xMbMask;
++    m_microBlockSize.height = (yMbMask + 1) & ~yMbMask;
++    m_microBlockSize.depth  = (zMbMask + 1) & ~zMbMask;
++
++    // The microblock copies (SIMD swizzles, hybrid memcpy) take each microblock as 256 contiguous bytes
++    // holding exactly that rectangle. Not every equation has one: GFX10's (non-RB+) 64KB_R_X forms the
++    // bottom 8 bits of an 8bpp surface from y4 but not y3, and x3 of a 16bpp one flips bit 8 as well as
++    // bit 7 (the pipe/bank XOR).
++    m_microBlocksClean = (xMbMask == (m_microBlockSize.width  - 1)) &&
++                         (yMbMask == (m_microBlockSize.height - 1)) &&
++                         (zMbMask == (m_microBlockSize.depth  - 1)) &&
++                         (sMbMask == 0) &&
++                         (((m_microBlockSize.width * m_microBlockSize.height * m_microBlockSize.depth)
++                           << m_bpeLog2) == 256);
++    for (UINT_32 i = 8; i < ADDR_MAX_EQUATION_BIT; i++)
++    {
++        if ((m_bit[i].x & xMbMask) || (m_bit[i].y & yMbMask) || (m_bit[i].z & zMbMask))
++        {
++            m_microBlocksClean = FALSE;
++        }
+     }
+-    m_microBlockSize.width  = xMbMask + 1;
+-    m_microBlockSize.height = yMbMask + 1;
+-    m_microBlockSize.depth  = zMbMask + 1;
+-    ADDR_ASSERT(IsPow2(m_microBlockSize.width));
+-    ADDR_ASSERT(IsPow2(m_microBlockSize.height));
+-    ADDR_ASSERT(IsPow2(m_microBlockSize.depth));
+ 
+     // An expandX of 1 is a no-op
+     m_maxExpandX = 1;
+@@ -817,7 +837,9 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
+     // swizzle function (they are all swizzle-agnostic beyond those 256B).
+     UINT_64 microSwKey = GetMicroSwKey(reinterpret_cast<const UINT_64*>(&m_bit[0]));
+ 
+-    if (flags.blockMemcpy)
++    // The memcpy layouts copy the mip tail (and hybrid memcpy everything) by microblock. Without clean
++    // microblocks the layout is the element copy's instead, which both directions share.
++    if (flags.blockMemcpy && m_microBlocksClean)
+     {
+ #if ADDR_HAS_AVX2
+         if (CpuSupportsAvx2())
+@@ -831,7 +853,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
+         }
+     }
+ 
+-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
++    if ((pfnRet == nullptr) && flags.hybridMemcpy && m_microBlocksClean)
+     {
+ #if ADDR_HAS_AVX2
+         if (CpuSupportsAvx2())
+@@ -846,7 +868,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
+     }
+ 
+     // If this is one of the known microswizzles and CPU support is present, use a hybrid copy that does
+-    // SIMD swizzling for aligned regions and falls back for unaligned edges.
++    // SIMD swizzling for aligned regions and falls back for unaligned edges. They copy whole microblocks.
+ #if ADDR_HAS_AVX2
+     static constexpr struct {
+         UINT_64                 microSwKey;
+@@ -868,7 +890,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
+         { GetMicroSwKey(MicroSw_Z_1BPE_AVX2::MicroEq),   CopyMemImgHybrid<MicroSw_Z_1BPE_AVX2>},
+         { GetMicroSwKey(MicroSw_D_1BPE_AVX2::MicroEq),   CopyMemImgHybrid<MicroSw_D_1BPE_AVX2>}
+     };
+-    if ((pfnRet == nullptr) && CpuSupportsAvx2())
++    if ((pfnRet == nullptr) && m_microBlocksClean && CpuSupportsAvx2())
+     {
+         for (const auto& func : AvxFuncs)
+         {
+@@ -902,7 +924,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
+         { GetMicroSwKey(MicroSw_Z_1BPE_NEON::MicroEq),   CopyMemImgHybrid<MicroSw_Z_1BPE_NEON>},
+         { GetMicroSwKey(MicroSw_D_1BPE_NEON::MicroEq),   CopyMemImgHybrid<MicroSw_D_1BPE_NEON>}
+     };
+-    if ((pfnRet == nullptr) && CpuSupportsNeon())
++    if ((pfnRet == nullptr) && m_microBlocksClean && CpuSupportsNeon())
+     {
+         for (const auto& func : NeonFuncs)
+         {
+@@ -949,7 +971,8 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyImgMemFunc(
+     ) const
+ {
+     UnalignedCopyMemImgFunc pfnRet = nullptr;
+-    if (flags.blockMemcpy)
++    // As for copies to images: without clean microblocks, the memcpy layout is the element copy's.
++    if (flags.blockMemcpy && m_microBlocksClean)
+     {
+ #if ADDR_HAS_AVX2
+         if (CpuSupportsAvx2())
+@@ -963,7 +986,7 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyImgMemFunc(
+         }
+     }
+ 
+-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
++    if ((pfnRet == nullptr) && flags.hybridMemcpy && m_microBlocksClean)
+     {
+ #if ADDR_HAS_AVX2
+         if (CpuSupportsAvx2())
+diff --git a/src/amd/addrlib/src/core/addrswizzler.h b/src/amd/addrlib/src/core/addrswizzler.h
+index 7f615711b84..fb47dc545e6 100644
+--- a/src/amd/addrlib/src/core/addrswizzler.h
++++ b/src/amd/addrlib/src/core/addrswizzler.h
+@@ -121,6 +121,10 @@ private:
+     // The microblock size
+     ADDR_EXTENT3D m_microBlockSize;
+ 
++    // Each microblock is 256 contiguous bytes holding exactly that rectangle, which the microblock
++    // copies need
++    BOOL_32 m_microBlocksClean;
++
+     // Number of 'x' bits at the bottom of the equation. Must be a pow2 and at least 1.
+     // This will be used as a simple optimization to batch together operations on adjacent x pixels.
+     UINT_32  m_maxExpandX;
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index eee51e4ddbc..277970464bb 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -1063,6 +1063,8 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
+ 
+    info->has_userptr = !info->is_virtio;
+    info->has_rgb9e5_color_target = info->gfx_level >= GFX10_3;
++   info->has_legacy_gs = info->gfx_level < GFX11;
++   info->has_gpu_written_ibs = true;
+    info->has_syncobj = true;
+    info->has_fence_to_handle = true;
+ 
+@@ -2061,6 +2063,8 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
+    fprintf(f, "    drm = %i.%i.%i\n", info->drm_major, info->drm_minor, info->drm_patchlevel);
+    fprintf(f, "    has_userptr = %i\n", info->has_userptr);
+    fprintf(f, "    has_rgb9e5_color_target = %i\n", info->has_rgb9e5_color_target);
++   fprintf(f, "    has_legacy_gs = %i\n", info->has_legacy_gs);
++   fprintf(f, "    has_gpu_written_ibs = %i\n", info->has_gpu_written_ibs);
+    fprintf(f, "    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
+    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
+    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
+diff --git a/src/amd/common/ac_gpu_info.h b/src/amd/common/ac_gpu_info.h
+index efb2125c38b..a004256a386 100644
+--- a/src/amd/common/ac_gpu_info.h
++++ b/src/amd/common/ac_gpu_info.h
+@@ -373,6 +373,12 @@ struct radeon_info {
+    bool has_userptr;
+    /* Whether the colour block renders COLOR_5_9_9_9 (E5B9G9R9). */
+    bool has_rgb9e5_color_target;
++   /* Whether a legacy (non-NGG) geometry shader can run: the GFX9-GFX10.3
++    * rings it needs are programmed through the kernel's registers. */
++   bool has_legacy_gs;
++   /* Whether the CP runs a command buffer the GPU wrote, chained with
++    * INDIRECT_BUFFER: device-generated commands need it. */
++   bool has_gpu_written_ibs;
+    bool has_syncobj;
+    bool has_timeline_syncobj;
+    bool has_fence_to_handle;
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index 9556979fd2c..ccdecdfe34c 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -1196,6 +1196,7 @@ radv_device_init_compiler_info(struct radv_device *device)
+             .use_ngg_culling = pdev->use_ngg_culling,
+             .nggc_max_ps_params = nggc_max_ps_params,
+             .no_ngg_gs = instance->drirc.performance.disable_ngg_gs,
++            .no_legacy_gs = pdev->use_ngg && !pdev->info.has_legacy_gs,
+             .load_grid_size_from_user_sgpr = pdev->load_grid_size_from_user_sgpr,
+             .emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat,
+             .primitives_generated_query = primitives_generated_query,
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index aebd718f303..dabef36840d 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -229,13 +229,13 @@ radv_shader_fp16_enabled(const struct radv_physical_device *pdev)
+ bool
+ radv_host_image_copy_enabled(const struct radv_physical_device *pdev)
+ {
+-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+-   /* TODO: HIC is supported on GFX10 but the recent addrlib bump introduced few regressions that
+-    * should be fixed soon, it's also still missing AVX for some formats. Let's not enable it by
+-    * default for now.
++   /* GFX10's (non-RB+) swizzles failed addrlib's microblock copies: an 8bpp 64KB_R_X surface forms
++    * its bottom 256B from y4 and not y3 (addrlib trapped), and x3 of a 16bpp 64KB_R_X or 64KB_Z_X
++    * microblock also flips bit 8 (half of every microblock landed in another one). addrlib now copies
++    * those per element (LutAddresser::InitSwizzleProps). GFX10.1's swizzles are GFX10's, whatever
++    * the GPU's level (the PS5's).
+     */
+-   return pdev->info.gfx_level >= GFX10_3 ||
+-          (pdev->info.gfx_level == GFX10 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
++   return pdev->info.gfx_level >= GFX10;
+ }
+ 
+ static bool
+@@ -863,7 +863,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+       .EXT_descriptor_indexing = true,
+       .EXT_device_address_binding_report = true,
+       .EXT_device_fault = true,
+-      .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8,
++      .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8 && pdev->info.has_gpu_written_ibs,
+       .EXT_device_memory_report = true,
+       .EXT_discard_rectangles = true,
+ #ifdef VK_USE_PLATFORM_DISPLAY_KHR
+@@ -1554,8 +1554,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .depthClampControl = true,
+ 
+       /* VK_EXT_device_generated_commands */
+-      .deviceGeneratedCommands = true,
+-      .dynamicGeneratedPipelineLayout = true,
++      .deviceGeneratedCommands = pdev->info.has_gpu_written_ibs,
++      .dynamicGeneratedPipelineLayout = pdev->info.has_gpu_written_ibs,
+ 
+       /* VK_KHR_maintenance8 */
+       .maintenance8 = true,
+diff --git a/src/amd/vulkan/radv_pipeline_graphics.c b/src/amd/vulkan/radv_pipeline_graphics.c
+index 68813f9cd73..683721ff837 100644
+--- a/src/amd/vulkan/radv_pipeline_graphics.c
++++ b/src/amd/vulkan/radv_pipeline_graphics.c
+@@ -1899,9 +1899,12 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
+ 
+       /* When pre-rasterization stages are compiled separately with shader objects, NGG GS needs to
+        * be disabled because if the next stage of VS/TES is GS and GS is unknown, it might use
+-       * streamout but it's not possible to know that when compiling VS or TES only.
++       * streamout but it's not possible to know that when compiling VS or TES only. (Not where
++       * a legacy GS cannot run: there they stay NGG, as on GFX11, below.)
+        */
+-      if (stages[MESA_SHADER_VERTEX].nir && stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY &&
++      if (compiler_info->key.no_legacy_gs) {
++         /* Nothing to disable. */
++      } else if (stages[MESA_SHADER_VERTEX].nir && stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY &&
+           !stages[MESA_SHADER_GEOMETRY].nir) {
+          stages[MESA_SHADER_VERTEX].info.is_ngg = false;
+       } else if (stages[MESA_SHADER_TESS_EVAL].nir &&
+@@ -1912,6 +1915,22 @@ radv_fill_shader_info_ngg(const struct radv_compiler_info *compiler_info, struct
+                  (!stages[MESA_SHADER_VERTEX].nir && !stages[MESA_SHADER_TESS_EVAL].nir)) {
+          stages[MESA_SHADER_GEOMETRY].info.is_ngg = false;
+       }
++
++      /* Where a legacy GS cannot run (the PS5's GPU), every GS is NGG, and so
++       * is every VS or TES before one, whether compiled with it or separately
++       * (a shader object): streamout from a GS is then not captured. A GS
++       * compiled alone has no stage before it to follow. */
++      if (compiler_info->key.no_legacy_gs) {
++         if (stages[MESA_SHADER_GEOMETRY].nir)
++            stages[MESA_SHADER_GEOMETRY].info.is_ngg = true;
++         if (stages[MESA_SHADER_VERTEX].nir &&
++             (stages[MESA_SHADER_VERTEX].info.next_stage == MESA_SHADER_GEOMETRY || stages[MESA_SHADER_GEOMETRY].nir) &&
++             !stages[MESA_SHADER_TESS_CTRL].nir && !stages[MESA_SHADER_TESS_EVAL].nir)
++            stages[MESA_SHADER_VERTEX].info.is_ngg = true;
++         if (stages[MESA_SHADER_TESS_EVAL].nir &&
++             (stages[MESA_SHADER_TESS_EVAL].info.next_stage == MESA_SHADER_GEOMETRY || stages[MESA_SHADER_GEOMETRY].nir))
++            stages[MESA_SHADER_TESS_EVAL].info.is_ngg = true;
++      }
+    }
+ 
+    /* Now that we know if ngg is used for geometry shaders, determine the subgroup size. */
+diff --git a/src/amd/vulkan/radv_queue.c b/src/amd/vulkan/radv_queue.c
+index 93f71ec8579..059e6935aeb 100644
+--- a/src/amd/vulkan/radv_queue.c
++++ b/src/amd/vulkan/radv_queue.c
+@@ -1644,6 +1644,14 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
+    if (result != VK_SUCCESS)
+       return result;
+ 
++   if (queue->state.tess_rings_bo && device->ws->ctx_set_tess_factor_ring) {
++      const struct radv_physical_device *pdev = radv_device_physical(device);
++      device->ws->ctx_set_tess_factor_ring(ctx,
++                                           radv_buffer_get_va(queue->state.tess_rings_bo) +
++                                              pdev->info.tess_offchip_ring_size,
++                                           pdev->info.tess_factor_ring_size);
++   }
++
+    if (use_ace) {
+       result = radv_update_gang_preambles(queue, submission->is_protected);
+       if (result != VK_SUCCESS)
+diff --git a/src/amd/vulkan/radv_radeon_winsys.h b/src/amd/vulkan/radv_radeon_winsys.h
+index 5b2c8e2bdb1..531ff6badbc 100644
+--- a/src/amd/vulkan/radv_radeon_winsys.h
++++ b/src/amd/vulkan/radv_radeon_winsys.h
+@@ -313,6 +313,11 @@ struct radeon_winsys {
+    bool (*cs_split_due)(struct ac_cmdbuf *cs);
+    void (*cs_split)(struct ac_cmdbuf *cs);
+ 
++   /* Only for a winsys whose system software owns the tessellation factor
++    * ring's registers (the PS5's); NULL otherwise. The ring a context's
++    * submissions use from now on, set before each submission that has one. */
++   void (*ctx_set_tess_factor_ring)(struct radeon_winsys_ctx *ctx, uint64_t va, uint32_t size);
++
+    void (*dump_bo_ranges)(struct radeon_winsys *ws, FILE *file);
+ 
+    void (*dump_bo_log)(struct radeon_winsys *ws, FILE *file);
+diff --git a/src/amd/vulkan/radv_shader.h b/src/amd/vulkan/radv_shader.h
+index 7f7611ad843..d14e6cd4b29 100644
+--- a/src/amd/vulkan/radv_shader.h
++++ b/src/amd/vulkan/radv_shader.h
+@@ -538,6 +538,7 @@ struct radv_compiler_info {
+       uint32_t use_ngg_culling : 1;
+       uint32_t nggc_max_ps_params : 4;
+       uint32_t no_ngg_gs : 1;
++      uint32_t no_legacy_gs : 1;
+       uint32_t load_grid_size_from_user_sgpr : 1;
+       uint32_t emulate_ngg_gs_query_pipeline_stat : 1;
+       uint32_t primitives_generated_query : 1;
+@@ -566,7 +567,7 @@ struct radv_compiler_info {
+       uint32_t no_implicit_varying_subgroup_size : 1;
+       uint32_t force_nan_preserve_min_max : 1;
+       uint32_t nir_debug_info : 1;
+-      uint32_t padding : 28;
++      uint32_t padding : 27;
+ 
+       int32_t force_aniso;
+ 
+diff --git a/src/amd/vulkan/radv_shader_info.c b/src/amd/vulkan/radv_shader_info.c
+index d4d4fba4507..1d201ac97b7 100644
+--- a/src/amd/vulkan/radv_shader_info.c
++++ b/src/amd/vulkan/radv_shader_info.c
+@@ -1357,7 +1357,10 @@ radv_determine_ngg_settings(const struct radv_compiler_info *compiler_info, stru
+       num_vertices_per_prim = mesa_vertices_per_prim(ngg_stage->nir->info.gs.output_primitive);
+    }
+ 
++   /* A merged shader compiled separately (an unlinked NGG GS where no legacy GS
++    * can run) declares no culling arguments. */
+    ngg_stage->info.has_ngg_culling =
++      !ngg_stage->info.merged_shader_compiled_separately &&
+       radv_consider_culling(compiler_info, ngg_stage->nir, ps_inputs_read, num_vertices_per_prim, &ngg_stage->info);
+ 
+    if (ngg_stage->stage != MESA_SHADER_GEOMETRY) {
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+index 009d21396db..fb5833da836 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+@@ -278,7 +278,7 @@ radv_ps5_cs_execute_ib(struct ac_cmdbuf *cs, struct radeon_winsys_bo *bo, const
+    (void)predicate;
+    /* A GPU-generated command buffer runs as an INDIRECT_BUFFER, which the
+     * console faults; the physical device does not report device-generated
+-    * commands. */
++    * commands (radeon_info.has_gpu_written_ibs). */
+    fprintf(stderr, "radv/ps5: an indirect buffer was recorded; the console cannot run one\n");
+    radv_ps5_cs(cs)->status = VK_ERROR_FEATURE_NOT_PRESENT;
+ }
+@@ -473,6 +473,28 @@ radv_ps5_cs_submit(struct radeon_winsys_ctx *rctx, const struct radv_winsys_subm
+       return result;
+ 
+    simple_mtx_lock(&queue->submit_lock);
++   /* AGC owns the tessellation factor ring's registers: the ring is handed to
++    * it, after the GPU has finished with the one it held. */
++   if (ctx->tess_factor_ring_va && (ctx->tess_factor_ring_va != queue->tess_factor_ring_va ||
++                                    ctx->tess_factor_ring_size != queue->tess_factor_ring_size)) {
++      radv_ps5_queue_wait_seq(queue, queue->submitted_seq, OS_TIMEOUT_INFINITE);
++      const int set = radv_ps5_set_tess_factor_ring(ctx->tess_factor_ring_va, ctx->tess_factor_ring_size);
++      if (set != 0)
++         fprintf(stderr, "radv/ps5: sceAgcDriverSetTFRing(0x%llx, %u) failed: 0x%08x\n",
++                 (unsigned long long)ctx->tess_factor_ring_va, ctx->tess_factor_ring_size, (unsigned)set);
++      queue->tess_factor_ring_va = ctx->tess_factor_ring_va;
++      queue->tess_factor_ring_size = ctx->tess_factor_ring_size;
++   }
++   /* The off-chip ring RADV allocated holds as many workgroups as its
++    * OFFCHIP_BUFFERING names; AGC starts with its own. */
++   if (ctx->tess_factor_ring_va && !queue->hs_offchip_param_set) {
++      const uint32_t param = ctx->ws->info.hs_offchip_param;
++      const int set = radv_ps5_set_hs_offchip_param(G_03093C_OFFCHIP_GRANULARITY_GFX103(param),
++                                                    G_03093C_OFFCHIP_BUFFERING_GFX103(param));
++      if (set != 0)
++         fprintf(stderr, "radv/ps5: sceAgcDriverSetHsOffchipParam failed: 0x%08x\n", (unsigned)set);
++      queue->hs_offchip_param_set = true;
++   }
+    if (submit->cs_count == 0) {
+       /* Nothing for the GPU: the signals follow what was submitted before. */
+       const uint64_t last = queue->submitted_seq;
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+index 4e2b8ff0bb6..ee26687de1c 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -291,6 +291,18 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
+    return sceAgcSuspendPoint();
+ }
+ 
++int
++radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
++{
++   return sceAgcDriverSetTFRing((uintptr_t)va, size);
++}
++
++int
++radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
++{
++   return sceAgcDriverSetHsOffchipParam(granularity, buffering);
++}
++
+ #else
+ 
+ /* --------------------------------------------------------------- host model */
+@@ -395,6 +407,22 @@ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint
+    return 0;
+ }
+ 
++int
++radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size)
++{
++   (void)va;
++   (void)size;
++   return 0;
++}
++
++int
++radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering)
++{
++   (void)granularity;
++   (void)buffering;
++   return 0;
++}
++
+ #endif
+ 
+ bool
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+index 8d793ba2384..764f4cfd4de 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.h
+@@ -72,6 +72,12 @@ void radv_ps5_cpu_flush(const void *address, size_t bytes);
+  * been flushed). The words end with a packet that writes marker_value to
+  * marker once they have run; the host model writes it at once. */
+ int radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value);
++/* The tessellation factor ring the GPU uses from the next submission on (AGC
++ * owns its registers); 0 or the system software's error. */
++int radv_ps5_set_tess_factor_ring(uint64_t va, uint32_t size);
++/* VGT_HS_OFFCHIP_PARAM's fields for the next submissions (AGC owns it too);
++ * 0 or the system software's error. */
++int radv_ps5_set_hs_offchip_param(uint32_t granularity, uint32_t buffering);
+ 
+ uint64_t radv_ps5_now_ns(void);
+ void radv_ps5_sleep_us(unsigned microseconds);
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+index 0d593a2d08e..54a130a8c45 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -221,10 +221,33 @@ radv_ps5_describe_gpu(struct radeon_info *info, bool compiler_compat_mode)
+    ac_fill_bug_info(info);
+    ac_fill_tess_info(info);
+    ac_fill_compiler_info(info, &dev, compiler_compat_mode);
++   /* The integer dot-product instructions do not compute what they should
++    * here: NGG's workgroup repack sums its counts with v_dot4_u32_u8, and
++    * with it a geometry shader whose vertex count is not constant, and a
++    * tessellated patch that NGG culling repacked, drew nothing. Without
++    * them (the v_msad_u8 fallback, as on NAVI10) both draw every texel (the
++    * RADV smoke title's geometry and tessellation checks). */
++   info->compiler_info.has_accelerated_dot_product = false;
+ 
+    /* What the console's layout needs beyond the NAVI21 defaults. */
+    info->chip_external_rev = RADV_PS5_ADDRLIB_REV;
++   /* A legacy GS hung the GPU every time (dEQP-VK.geometry with
++    * RADV_DEBUG=nongg: 31 of 33 cases), and neither AGC library exports a
++    * way to set the GS rings it needs, as sceAgcDriverSetTFRing does the
++    * tessellation factor ring. */
++   info->has_legacy_gs = false;
++   /* An INDIRECT_BUFFER into title memory faulted the GPU (PS5_Vulkan B8), so
++    * the command buffers device-generated commands write cannot run. */
++   info->has_gpu_written_ibs = false;
+    info->rbplus_allowed = false;
++   /* A depth-only image cleared to 0 read back 1 after a draw whose
++    * fragments were all discarded (dEQP-VK.dynamic_state.*.discard.depth;
++    * with RADV_DEBUG=nohiz or nofastclears it passed): the TC-compatible
++    * HTILE clear bug Mesa records for GFX8 and GFX1013 (the BC-250, whose
++    * missing dot products this GPU shares too). This turns on its
++    * workaround, ZRANGE_PRECISION 0 after a clear to 0. */
++   info->has_htile_tc_z_clear_bug_without_stencil = true;
++   info->has_htile_tc_z_clear_bug_with_stencil = true;
+    info->has_dedicated_vram = true;
+    info->all_vram_visible = true;
+    info->address32_hi = RADV_PS5_ADDRESS32_HI;
+@@ -341,6 +364,14 @@ radv_ps5_ctx_create(struct radeon_winsys *rws, enum radeon_ctx_priority priority
+    return VK_SUCCESS;
+ }
+ 
++static void
++radv_ps5_ctx_set_tess_factor_ring(struct radeon_winsys_ctx *rctx, uint64_t va, uint32_t size)
++{
++   struct radv_ps5_ctx *const ctx = (struct radv_ps5_ctx *)rctx;
++   ctx->tess_factor_ring_va = va;
++   ctx->tess_factor_ring_size = size;
++}
++
+ static void
+ radv_ps5_ctx_destroy(struct radeon_winsys_ctx *rctx)
+ {
+@@ -417,6 +448,7 @@ radv_ps5_winsys_create(const struct radeon_info *info, uint64_t debug_flags, uin
+    ws->base.query_gpuvm_fault = radv_ps5_winsys_query_gpuvm_fault;
+    ws->base.ctx_create = radv_ps5_ctx_create;
+    ws->base.ctx_destroy = radv_ps5_ctx_destroy;
++   ws->base.ctx_set_tess_factor_ring = radv_ps5_ctx_set_tess_factor_ring;
+    ws->base.ctx_wait_idle = radv_ps5_ctx_wait_idle;
+    ws->base.ctx_set_pstate = radv_ps5_ctx_set_pstate;
+    ws->base.get_fd = radv_ps5_winsys_get_fd;
+diff --git a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+index a56ff5d3724..457f0899515 100644
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+@@ -57,6 +57,12 @@ struct radv_ps5_queue {
+    uint64_t submitted_seq;
+    uint64_t completed_seq;
+ 
++   /* The tessellation factor ring AGC holds, and whether it holds RADV's
++    * off-chip parameter (submit_lock). */
++   uint64_t tess_factor_ring_va;
++   uint32_t tess_factor_ring_size;
++   bool hs_offchip_param_set;
++
+    /* Waiters for a sync object to be submitted for signalling. */
+    mtx_t sync_lock;
+    cnd_t sync_cond;
+@@ -137,6 +143,9 @@ struct radv_ps5_ctx {
+    enum radeon_ctx_priority priority;
+    /* Whether a submission on this context carried its initial preamble. */
+    bool queue_used[AMD_NUM_IP_TYPES][MAX_RINGS_PER_TYPE];
++   /* The tessellation factor ring this context's submissions use, if any. */
++   uint64_t tess_factor_ring_va;
++   uint32_t tess_factor_ring_size;
+ };
+ 
+ /* Completion: the sequence the GPU has run up to, read from the marker. */
