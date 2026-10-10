@@ -1,0 +1,1310 @@
+ps5: OpenGL, OpenGL ES and Vulkan through Mesa
+
+OpenGL and OpenGL ES windows use Mesa's EGL (libEGL.so.1 with libGL.so.1 or
+libGLESv2.so.2, the "videoout" platform, zink), and Vulkan windows RADV
+(libvulkan.so.1) with VK_KHR_display surfaces. Both are loaded at run time
+from ps5-payload-mesa. OSMesa is removed.
+
+SDL opens VideoOut only when a window framebuffer needs it, and hands it to
+Mesa before loading EGL or Vulkan; the display then reports Mesa's
+3840x2160 swapchain as its one mode, and OpenGL and Vulkan windows have
+that size.
+
+ CMakeLists.txt                |  18 ++-
+ src/video/ps5/SDL_ps5opengl.c | 165 ++++++++++++++++++++
+ src/video/ps5/SDL_ps5opengl.h |  40 +++++
+ src/video/ps5/SDL_ps5osmesa.c | 246 -----------------------------
+ src/video/ps5/SDL_ps5osmesa.h |  32 ----
+ src/video/ps5/SDL_ps5video.c  | 353 +++++++++++++++++++++++++++++++-----------
+ src/video/ps5/SDL_ps5video.h  |  25 +++
+ src/video/ps5/SDL_ps5vulkan.c | 156 +++++++++++++++++++
+ src/video/ps5/SDL_ps5vulkan.h |  46 ++++++
+ 9 files changed, 709 insertions(+), 372 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1992a1e..57ff9b9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -474,7 +474,7 @@ set_option(SDL_WASAPI              "Use the Windows WASAPI audio driver" ${WINDO
+ set_option(SDL_RENDER_D3D          "Enable the Direct3D render driver" ${WINDOWS})
+ set_option(SDL_RENDER_METAL        "Enable the Metal render driver" ${APPLE})
+ set_option(SDL_VIVANTE             "Use Vivante EGL video driver" ${UNIX_SYS})
+-dep_option(SDL_VULKAN              "Enable Vulkan support" ON "ANDROID OR APPLE OR LINUX OR WINDOWS" OFF)
++dep_option(SDL_VULKAN              "Enable Vulkan support" ON "ANDROID OR APPLE OR LINUX OR WINDOWS OR PS5" OFF)
+ set_option(SDL_METAL               "Enable Metal support" ${APPLE})
+ set_option(SDL_KMSDRM              "Use KMS DRM video driver" ${UNIX_SYS})
+ dep_option(SDL_KMSDRM_SHARED       "Dynamically load KMS DRM support" ON "SDL_KMSDRM" OFF)
+@@ -1490,11 +1490,25 @@ elseif(PS5)
+     set(SOURCE_FILES ${SOURCE_FILES} ${PS5_VIDEO_SOURCES})
+     set(HAVE_SDL_VIDEO TRUE)
+     list(APPEND EXTRA_LIBS SceVideoOut SceKeyboard SceImeDialog SceUserService SceSystemService ScePad)
++    # OpenGL, OpenGL ES and Vulkan come from Mesa (pacbrew ps5-payload-mesa),
++    # loaded at run time: libEGL.so.1 with libGL.so.1 or libGLESv2.so.2
++    # (EGL's videoout platform, zink), and RADV as libvulkan.so.1.
++    if(SDL_OPENGL OR SDL_OPENGLES)
++      set(SDL_VIDEO_OPENGL_EGL 1)
++      list(APPEND EXTRA_CFLAGS "-DMESA_EGL_NO_X11_HEADERS -DEGL_NO_X11")
++    endif()
+     if(SDL_OPENGL)
+       set(SDL_VIDEO_OPENGL 1)
+-      set(SDL_VIDEO_OPENGL_OSMESA 1)
+       set(HAVE_OPENGL TRUE)
+     endif()
++    if(SDL_OPENGLES)
++      set(SDL_VIDEO_OPENGL_ES2 1)
++      set(HAVE_OPENGLES TRUE)
++    endif()
++    if(SDL_VULKAN)
++      set(SDL_VIDEO_VULKAN 1)
++      set(HAVE_VULKAN TRUE)
++    endif()
+   endif()
+   if(SDL_MISC)
+     file(GLOB PS5_MISC_SOURCES ${SDL2_SOURCE_DIR}/src/misc/ps5/*.c)
+diff --git a/src/video/ps5/SDL_ps5opengl.c b/src/video/ps5/SDL_ps5opengl.c
+new file mode 100644
+index 0000000..1d0c6c5
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5opengl.c
+@@ -0,0 +1,165 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#if defined(SDL_VIDEO_DRIVER_PS5) && defined(SDL_VIDEO_OPENGL_EGL)
++
++/*
++ * OpenGL 4.6 and OpenGL ES 3.2 on Mesa: EGL's "videoout" platform, whose
++ * window surfaces are zink's kopper swapchains on RADV's VK_KHR_display.
++ * There is one window surface, the whole 3840x2160 screen; any non-zero
++ * native window names it.
++ *
++ * SDL_EGL_LoadLibrary dlopen()s libGL.so.1 (or libGLESv2.so.2) and then
++ * libEGL.so.1, each RTLD_LOCAL. The SDK's loader only shares a library
++ * between two dlopen()s when the first was RTLD_GLOBAL; otherwise libGL and
++ * libEGL would each get a copy of libgallium, and the context EGL makes
++ * current would not be the one libGL's functions dispatch to. So libEGL is
++ * loaded RTLD_GLOBAL first, and stays loaded for the process.
++ */
++
++#include <dlfcn.h>
++
++#include "../SDL_egl_c.h"
++#include "SDL_ps5video.h"
++#include "SDL_ps5opengl.h"
++
++#define PS5_DEFAULT_EGL "libEGL.so.1"
++
++/* Any non-zero native window is the display (platform_videoout.c). */
++#define PS5_EGL_NATIVE_WINDOW ((NativeWindowType)1)
++
++static void *ps5_egl_global_handle = NULL;
++
++static int PS5_EGL_LoadLibrary(_THIS, const char *path)
++{
++    const char *egl_path;
++
++    egl_path = SDL_getenv("SDL_VIDEO_EGL_DRIVER");
++    if (!egl_path) {
++        egl_path = PS5_DEFAULT_EGL;
++    }
++
++    /* EGL_DEFAULT_DISPLAY is the videoout platform, whatever Mesa's
++       default native platform was built as. */
++    SDL_setenv("EGL_PLATFORM", "videoout", 0);
++
++    if (!ps5_egl_global_handle) {
++        ps5_egl_global_handle = dlopen(egl_path, RTLD_NOW | RTLD_GLOBAL);
++        if (!ps5_egl_global_handle) {
++            const char *err = dlerror();
++            return SDL_SetError("Failed loading %s: %s", egl_path,
++                                err ? err : "not found");
++        }
++    }
++
++    /* Mesa opens VideoOut for its swapchains: SDL must have let it go. */
++    PS5_VideoOut_Release(_this);
++
++    if (SDL_EGL_LoadLibrary(_this, path, (NativeDisplayType)EGL_DEFAULT_DISPLAY, 0) < 0) {
++        if (_this->egl_data) {
++            SDL_EGL_UnloadLibrary(_this);
++        }
++        return -1;
++    }
++
++    PS5_UseGPUOutput(_this);
++
++    return 0;
++}
++
++int PS5_EGL_CreateWindowSurface(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++    EGLSurface surface;
++
++    if (!_this->egl_data) {
++        return SDL_SetError("EGL is not loaded");
++    }
++
++    surface = SDL_EGL_CreateSurface(_this, PS5_EGL_NATIVE_WINDOW);
++    if (surface == EGL_NO_SURFACE) {
++        return -1; /* SDL_EGL_CreateSurface has set the error */
++    }
++
++    data->egl_surface = surface;
++
++    return 0;
++}
++
++void PS5_EGL_DestroyWindowSurface(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++
++    if (data && data->egl_surface != EGL_NO_SURFACE) {
++        if (_this->egl_data) {
++            SDL_EGL_DestroySurface(_this, data->egl_surface);
++        }
++        data->egl_surface = EGL_NO_SURFACE;
++    }
++}
++
++static SDL_GLContext PS5_EGL_CreateContext(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++
++    if (data->egl_surface == EGL_NO_SURFACE) {
++        SDL_SetError("The window was not created with SDL_WINDOW_OPENGL");
++        return NULL;
++    }
++
++    return SDL_EGL_CreateContext(_this, data->egl_surface);
++}
++
++static int PS5_EGL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
++{
++    EGLSurface surface = EGL_NO_SURFACE;
++
++    if (window && context) {
++        surface = ((SDL_WindowData *)window->driverdata)->egl_surface;
++    }
++
++    return SDL_EGL_MakeCurrent(_this, surface, context);
++}
++
++static int PS5_EGL_SwapWindow(_THIS, SDL_Window *window)
++{
++    return SDL_EGL_SwapBuffers(_this, ((SDL_WindowData *)window->driverdata)->egl_surface);
++}
++
++int PS5_GL_InitDevice(SDL_VideoDevice *device)
++{
++    device->GL_LoadLibrary = PS5_EGL_LoadLibrary;
++    device->GL_GetProcAddress = SDL_EGL_GetProcAddress;
++    device->GL_UnloadLibrary = SDL_EGL_UnloadLibrary;
++    device->GL_CreateContext = PS5_EGL_CreateContext;
++    device->GL_MakeCurrent = PS5_EGL_MakeCurrent;
++    device->GL_SetSwapInterval = SDL_EGL_SetSwapInterval;
++    device->GL_GetSwapInterval = SDL_EGL_GetSwapInterval;
++    device->GL_SwapWindow = PS5_EGL_SwapWindow;
++    device->GL_DeleteContext = SDL_EGL_DeleteContext;
++
++    return 0;
++}
++
++#endif /* SDL_VIDEO_DRIVER_PS5 && SDL_VIDEO_OPENGL_EGL */
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5opengl.h b/src/video/ps5/SDL_ps5opengl.h
+new file mode 100644
+index 0000000..c7f48e4
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5opengl.h
+@@ -0,0 +1,40 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#ifndef SDL_ps5opengl_h_
++#define SDL_ps5opengl_h_
++
++#include "../SDL_sysvideo.h"
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++
++/* Installs OpenGL and OpenGL ES on Mesa's EGL. */
++int PS5_GL_InitDevice(SDL_VideoDevice *device);
++
++int PS5_EGL_CreateWindowSurface(_THIS, SDL_Window *window);
++void PS5_EGL_DestroyWindowSurface(_THIS, SDL_Window *window);
++
++#endif /* SDL_VIDEO_OPENGL_EGL */
++
++#endif /* SDL_ps5opengl_h_ */
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5osmesa.c b/src/video/ps5/SDL_ps5osmesa.c
+deleted file mode 100644
+index db0c8a0..0000000
+--- a/src/video/ps5/SDL_ps5osmesa.c
++++ /dev/null
+@@ -1,246 +0,0 @@
+-/*
+-  Simple DirectMedia Layer
+-  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
+-
+-  This software is provided 'as-is', without any express or implied
+-  warranty.  In no event will the authors be held liable for any damages
+-  arising from the use of this software.
+-
+-  Permission is granted to anyone to use this software for any purpose,
+-  including commercial applications, and to alter it and redistribute it
+-  freely, subject to the following restrictions:
+-
+-  1. The origin of this software must not be misrepresented; you must not
+-     claim that you wrote the original software. If you use this software
+-     in a product, an acknowledgment in the product documentation would be
+-     appreciated but is not required.
+-  2. Altered source versions must be plainly marked as such, and must not be
+-     misrepresented as being the original software.
+-  3. This notice may not be removed or altered from any source distribution.
+-*/
+-
+-#include "SDL_ps5osmesa.h"
+-
+-#ifdef SDL_VIDEO_OPENGL_OSMESA
+-
+-#include <SDL2/SDL_opengl.h>
+-#include <dlfcn.h>
+-
+-#ifndef OSMESA_Y_UP
+-#define OSMESA_Y_UP 0x11
+-#endif
+-
+-#define DEFAULT_OSMESA "libOSMesa.so.8"
+-
+-struct SDL_GLDriverData
+-{
+-    void* (*OSMesaGetProcAddress)(const char*);
+-    void* (*OSMesaCreateContext)(GLenum, void*);
+-    void (*OSMesaPixelStore)(GLint, GLint);
+-    void (*OSMesaPostprocess)(void*, const char*, unsigned);
+-    void (*OSMesaDestroyContext)(void*);
+-    GLboolean (*OSMesaMakeCurrent)(void* , void*, GLenum, GLsizei, GLsizei);
+-    GLboolean (*OSMesaGetColorBuffer)(void*, GLint*, GLint*, GLint*, void**);
+-    void (*OSMesaFlush)(void);
+-};
+-
+-static int OSMesa_LoadLibrary(_THIS, const char *path)
+-{
+-    static int buffer = 0;
+-    void* handle;
+-    void* ctx;
+-
+-    if (_this->gl_data) {
+-        return SDL_SetError("OSMesa library already loaded");
+-    }
+-
+-    path = DEFAULT_OSMESA;
+-    handle = _this->gl_config.dll_handle = dlopen(path, RTLD_LAZY);
+-    if (!handle) {
+-      return SDL_SetError("%s: %s", path, dlerror());
+-    }
+-
+-    SDL_strlcpy(_this->gl_config.driver_path, path,
+-                SDL_arraysize(_this->gl_config.driver_path));
+-
+-    _this->gl_data = SDL_calloc(1, sizeof(struct SDL_GLDriverData));
+-    if (!_this->gl_data) {
+-        return SDL_OutOfMemory();
+-    }
+-
+-    _this->gl_data->OSMesaGetProcAddress = dlsym(handle, "OSMesaGetProcAddress");
+-    if (!_this->gl_data->OSMesaGetProcAddress) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaCreateContext = dlsym(handle, "OSMesaCreateContext");
+-    if (!_this->gl_data->OSMesaCreateContext) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaDestroyContext = dlsym(handle, "OSMesaDestroyContext");
+-    if (!_this->gl_data->OSMesaDestroyContext) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaGetColorBuffer = dlsym(handle, "OSMesaGetColorBuffer");
+-    if (!_this->gl_data->OSMesaGetColorBuffer) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaMakeCurrent = dlsym(handle, "OSMesaMakeCurrent");
+-    if (!_this->gl_data->OSMesaMakeCurrent) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaPixelStore = dlsym(handle, "OSMesaPixelStore");
+-    if (!_this->gl_data->OSMesaPixelStore) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    _this->gl_data->OSMesaFlush = _this->gl_data->OSMesaGetProcAddress("glFlush");
+-    if (!_this->gl_data->OSMesaFlush) {
+-        return SDL_SetError("%s", dlerror());
+-    }
+-
+-    // Create a minimal dummy context so glGetString can be invoked without
+-    // having to set a real context.
+-    ctx = _this->gl_data->OSMesaCreateContext(GL_RGBA, NULL);
+-    if (!ctx) {
+-        return SDL_SetError("Failed to create dummy context");
+-    }
+-    if (!_this->gl_data->OSMesaMakeCurrent(ctx, &buffer, GL_UNSIGNED_BYTE, 1, 1)) {
+-        return SDL_SetError("Failed to make dummy context current");
+-    }
+-
+-    return 0;
+-}
+-
+-static void OSMesa_UnloadLibrary(_THIS)
+-{
+-    if (_this->gl_config.dll_handle) {
+-        dlclose(_this->gl_config.dll_handle);
+-	_this->gl_config.dll_handle = NULL;
+-    }
+-
+-    if (_this->gl_data) {
+-      SDL_free(_this->gl_data);
+-      _this->gl_data = NULL;
+-    }
+-}
+-
+-static void* OSMesa_GetProcAddress(_THIS, const char *proc)
+-{
+-    if (_this->gl_data) {
+-        return _this->gl_data->OSMesaGetProcAddress(proc);
+-    }
+-    return NULL;
+-}
+-
+-static int OSMesa_MakeCurrent(_THIS, SDL_Window * window, SDL_GLContext context)
+-{
+-    SDL_Surface* surface = SDL_GetWindowSurface(window);
+-
+-    if (!_this->gl_data) {
+-        return SDL_SetError("OSMesa is not loaded");
+-    }
+-    if (!surface) {
+-        return SDL_SetError("Couldn't find surface for window");
+-    }
+-
+-    if (!_this->gl_data->OSMesaMakeCurrent(context, surface->pixels, GL_UNSIGNED_BYTE,
+-					   surface->w, surface->h)) {
+-        return SDL_SetError("Failed to make context current");
+-    }
+-
+-    _this->gl_data->OSMesaPixelStore(OSMESA_Y_UP, 0);
+-
+-    return 0;
+-}
+-
+-static void OSMesa_DeleteContext(_THIS, SDL_GLContext ctx)
+-{
+-    if (_this->gl_data && ctx) {
+-        _this->gl_data->OSMesaDestroyContext(ctx);
+-    }
+-}
+-
+-static SDL_GLContext OSMesa_CreateContext(_THIS, SDL_Window * window)
+-{
+-    void* ctx_share;
+-    void* ctx;
+-
+-    if (!_this->gl_data) {
+-        SDL_SetError("OSMesa is not loaded");
+-	return NULL;
+-    }
+-
+-    if (_this->gl_config.share_with_current_context) {
+-        ctx_share = SDL_GL_GetCurrentContext();
+-    } else {
+-        ctx_share = NULL;
+-    }
+-
+-    ctx = _this->gl_data->OSMesaCreateContext(GL_RGBA, ctx_share);
+-    if (!ctx) {
+-        SDL_SetError("Failed to create context");
+-        return NULL;
+-    }
+-
+-    if (OSMesa_MakeCurrent(_this, window, ctx) < 0) {
+-        OSMesa_DeleteContext(_this, ctx);
+-        return NULL;
+-    }
+-
+-    return (SDL_GLContext)ctx;
+-}
+-
+-static int OSMesa_SetSwapInterval(_THIS, int interval)
+-{
+-    return 0;
+-}
+-
+-static int OSMesa_GetSwapInterval(_THIS)
+-{
+-    return 0;
+-}
+-
+-static int OSMesa_SwapWindow(_THIS, SDL_Window *window)
+-{
+-    SDL_Surface *surface;
+-
+-    if (!_this->gl_data) {
+-        return SDL_SetError("OSMesa is not loaded");
+-    }
+-
+-    _this->gl_data->OSMesaFlush();
+-
+-    surface = SDL_GetWindowSurface(window);
+-    if (!surface) {
+-        return SDL_SetError("Failed to get SDL window surface");
+-    }
+-
+-    if (SDL_UpdateWindowSurface(window) != 0) {
+-        return SDL_SetError("Failed to update window surface");
+-    }
+-
+-    return 0;
+-}
+-
+-
+-int PS5_OSMesa_InitDevice(SDL_VideoDevice* device)
+-{
+-    device->GL_LoadLibrary = OSMesa_LoadLibrary;
+-    device->GL_GetProcAddress = OSMesa_GetProcAddress;
+-    device->GL_UnloadLibrary = OSMesa_UnloadLibrary;
+-    device->GL_CreateContext = OSMesa_CreateContext;
+-    device->GL_MakeCurrent = OSMesa_MakeCurrent;
+-    device->GL_SetSwapInterval = OSMesa_SetSwapInterval;
+-    device->GL_GetSwapInterval = OSMesa_GetSwapInterval;
+-    device->GL_SwapWindow = OSMesa_SwapWindow;
+-    device->GL_DeleteContext = OSMesa_DeleteContext;
+-
+-    return 0;
+-}
+-
+-#endif
+diff --git a/src/video/ps5/SDL_ps5osmesa.h b/src/video/ps5/SDL_ps5osmesa.h
+deleted file mode 100644
+index d230950..0000000
+--- a/src/video/ps5/SDL_ps5osmesa.h
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/*
+-  Simple DirectMedia Layer
+-  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
+-
+-  This software is provided 'as-is', without any express or implied
+-  warranty.  In no event will the authors be held liable for any damages
+-  arising from the use of this software.
+-
+-  Permission is granted to anyone to use this software for any purpose,
+-  including commercial applications, and to alter it and redistribute it
+-  freely, subject to the following restrictions:
+-
+-  1. The origin of this software must not be misrepresented; you must not
+-     claim that you wrote the original software. If you use this software
+-     in a product, an acknowledgment in the product documentation would be
+-     appreciated but is not required.
+-  2. Altered source versions must be plainly marked as such, and must not be
+-     misrepresented as being the original software.
+-  3. This notice may not be removed or altered from any source distribution.
+-*/
+-#include "../../SDL_internal.h"
+-
+-#ifndef SDL_ps5osmesa_h_
+-#define SDL_ps5osmesa_h_
+-
+-#include "../SDL_sysvideo.h"
+-
+-int PS5_OSMesa_InitDevice(SDL_VideoDevice* dev);
+-
+-#endif /* SDL_ps5osmesa_h_ */
+-
+-/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
+index a62be0e..faf3243 100644
+--- a/src/video/ps5/SDL_ps5video.c
++++ b/src/video/ps5/SDL_ps5video.c
+@@ -24,11 +24,165 @@
+ #ifdef SDL_VIDEO_DRIVER_PS5
+ 
+ #include <errno.h>
++#include <sys/mman.h>
+ 
+ #include "SDL_ps5video.h"
+ #include "SDL_ps5keyboard.h"
+ #include "SDL_ps5remote.h"
+-#include "SDL_ps5osmesa.h"
++#include "SDL_ps5opengl.h"
++#include "SDL_ps5vulkan.h"
++
++/*
++ * VideoOut is opened by SDL only when a window framebuffer needs it
++ * (SDL_GetWindowSurface, the software renderer). OpenGL on EGL and
++ * Vulkan present through Mesa's VideoOut WSI instead, which opens VideoOut
++ * itself, once per process: before Mesa is loaded SDL closes its own handle
++ * (PS5_UseGPUOutput), and the display then reports the WSI's resolution.
++ */
++
++/* Direct memory for SDL's two VideoOut framebuffers. */
++#define PS5_VIDEOOUT_MEMSIZE 0x4000000
++
++static int PS5_VideoOut_OpenHandle(_THIS)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++    PS5_VideoAttr vattr;
++
++    device_data->handle = sceVideoOutOpen(0xff, 0, 0, NULL);
++    if (device_data->handle < 0) {
++        device_data->handle = -1;
++        return SDL_SetError("sceVideoOutOpen: %s", strerror(errno));
++    }
++
++    if (sceKernelCreateEqueue(&device_data->evt_queue, "flip queue")) {
++        device_data->evt_queue = NULL;
++        return SDL_SetError("sceKernelCreateEqueue: %s", strerror(errno));
++    }
++    if (sceVideoOutAddFlipEvent(device_data->evt_queue, device_data->handle, 0)) {
++        return SDL_SetError("sceVideoOutAddFlipEvent: %s", strerror(errno));
++    }
++    if (sceVideoOutSetFlipRate(device_data->handle, 0)) {
++        return SDL_SetError("sceVideoOutSetFlipRate: %s", strerror(errno));
++    }
++
++    SDL_zero(vattr);
++    sceVideoOutSetBufferAttribute2(&vattr, 0x8000000022000000UL, 0,
++                                   device_data->surface->w,
++                                   device_data->surface->h, 0, 0, 0);
++
++    if (sceVideoOutRegisterBuffers2(device_data->handle, 0, 0,
++                                    device_data->vbuf, 2, &vattr, 0, NULL)) {
++        return SDL_SetError("sceVideoOutRegisterBuffers2: %s", strerror(errno));
++    }
++
++    return 0;
++}
++
++static void PS5_VideoOut_CloseHandle(_THIS)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++
++    if (device_data->evt_queue) {
++        if (device_data->handle >= 0) {
++            sceVideoOutDeleteFlipEvent(device_data->evt_queue,
++                                       device_data->handle);
++        }
++        sceKernelDeleteEqueue(device_data->evt_queue);
++        device_data->evt_queue = NULL;
++    }
++
++    if (device_data->handle >= 0) {
++        sceVideoOutClose(device_data->handle);
++        device_data->handle = -1;
++    }
++}
++
++static int PS5_VideoOut_Open(_THIS)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++    void *vaddr = 0;
++
++    if (device_data->handle >= 0) {
++        return 0;
++    }
++
++    if (device_data->gpu_output) {
++        return SDL_SetError("The display is driven by OpenGL or Vulkan; "
++                            "a window framebuffer cannot be shown");
++    }
++
++    if (!device_data->paddr) {
++        device_data->memsize = PS5_VIDEOOUT_MEMSIZE;
++        if (sceKernelAllocateMainDirectMemory(device_data->memsize, 0x20000, 3,
++                                              &device_data->paddr)) {
++            device_data->paddr = 0;
++            return SDL_SetError("sceKernelAllocateMainDirectMemory: %s",
++                                strerror(errno));
++        }
++
++        if (sceKernelMapDirectMemory(&vaddr, device_data->memsize, 0x33, 0,
++                                     device_data->paddr, 0x20000)) {
++            sceKernelReleaseDirectMemory(device_data->paddr,
++                                         device_data->memsize);
++            device_data->paddr = 0;
++            return SDL_SetError("sceKernelMapDirectMemory: %s",
++                                strerror(errno));
++        }
++
++        device_data->vbuf[0].data = vaddr;
++        device_data->vbuf[1].data = (uint8_t *)vaddr + (device_data->memsize / 2);
++    }
++
++    if (PS5_VideoOut_OpenHandle(_this) < 0) {
++        PS5_VideoOut_CloseHandle(_this);
++        return -1;
++    }
++
++    return 0;
++}
++
++void PS5_VideoOut_Release(_THIS)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++
++    PS5_VideoOut_CloseHandle(_this);
++
++    if (device_data->paddr) {
++        munmap(device_data->vbuf[0].data, device_data->memsize);
++        sceKernelReleaseDirectMemory(device_data->paddr, device_data->memsize);
++        device_data->paddr = 0;
++        device_data->memsize = 0;
++        SDL_zeroa(device_data->vbuf);
++    }
++}
++
++void PS5_UseGPUOutput(_THIS)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++    SDL_VideoDisplay *display = SDL_GetDisplay(0);
++    SDL_DisplayMode mode;
++
++    PS5_VideoOut_Release(_this);
++
++    if (device_data->gpu_output) {
++        return;
++    }
++    device_data->gpu_output = SDL_TRUE;
++
++    /* Mesa's swapchains are 3840x2160 BGRA (B8G8R8A8 in memory, which SDL
++       names ARGB8888), at the display's refresh rate. */
++    SDL_zero(mode);
++    mode.format = SDL_PIXELFORMAT_ARGB8888;
++    mode.w = PS5_GPU_OUTPUT_WIDTH;
++    mode.h = PS5_GPU_OUTPUT_HEIGHT;
++    mode.refresh_rate = 60;
++
++    if (display) {
++        SDL_ResetDisplayModes(0);
++        SDL_SetDesktopDisplayMode(display, &mode);
++        SDL_SetCurrentDisplayMode(display, &mode);
++    }
++}
+ 
+ static void PS5_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
+ {
+@@ -50,6 +204,10 @@ static int PS5_CreateWindowFramebuffer(_THIS, SDL_Window *window,
+     // PS5_DestroyWindowFramebuffer(window);
+     SDL_assert(window->surface == NULL);
+ 
++    if (PS5_VideoOut_Open(_this) < 0) {
++        return -1;
++    }
++
+     SDL_GetWindowSizeInPixels(window, &w, &h);
+     surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 0, surface_format);
+     if (!surface) {
+@@ -79,6 +237,10 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+         return SDL_SetError("Couldn't find surface for window");
+     }
+ 
++    if (PS5_VideoOut_Open(_this) < 0) {
++        return -1;
++    }
++
+     if(surface->w == device_data->surface->w &&
+        surface->h == device_data->surface->h) {
+         PS5_Tilemap_Blit(device_data->tmap, surface->pixels, surface->pitch / 4,
+@@ -128,41 +290,22 @@ static int PS5_SetDisplayMode(_THIS, SDL_VideoDisplay * display,
+                               SDL_DisplayMode * mode)
+ {
+     PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
+-    PS5_VideoAttr vattr = {0};
+     SDL_Surface *surface;
+     PS5_Tilemap *tmap;
+ 
+-    if(PS5_Tilemap_BufferSize(mode->w, mode->h) > device_data->memsize / 2) {
+-        return SDL_SetError("%dx%d does not fit in the video buffers",
+-                            mode->w, mode->h);
++    if (device_data->gpu_output) {
++        /* Mesa's WSI has one resolution. */
++        if (mode->w != PS5_GPU_OUTPUT_WIDTH || mode->h != PS5_GPU_OUTPUT_HEIGHT) {
++            return SDL_SetError("%dx%d: OpenGL and Vulkan present at %dx%d only",
++                                mode->w, mode->h,
++                                PS5_GPU_OUTPUT_WIDTH, PS5_GPU_OUTPUT_HEIGHT);
++        }
++        return 0;
+     }
+ 
+-    if(device_data->evt_queue) {
+-        sceVideoOutDeleteFlipEvent(device_data->evt_queue, device_data->handle);
+-        sceKernelDeleteEqueue(device_data->evt_queue);
+-    }
+-
+-    if(device_data->handle >= 0) {
+-        sceVideoOutClose(device_data->handle);
+-    }
+-    device_data->handle = sceVideoOutOpen(0xff, 0, 0, NULL);
+-
+-    if (sceKernelCreateEqueue(&device_data->evt_queue, "flip queue")) {
+-        return SDL_SetError("sceKernelCreateEqueue: %s", strerror(errno));
+-    }
+-    if (sceVideoOutAddFlipEvent(device_data->evt_queue, device_data->handle, 0)) {
+-        return SDL_SetError("sceVideoOutAddFlipEvent: %s", strerror(errno));
+-    }
+-    if (sceVideoOutSetFlipRate(device_data->handle, 0)) {
+-        return SDL_SetError("sceVideoOutSetFlipRate: %s", strerror(errno));
+-    }
+-
+-    sceVideoOutSetBufferAttribute2(&vattr, 0x8000000022000000UL, 0,
+-                                   mode->w, mode->h, 0, 0, 0);
+-
+-    if (sceVideoOutRegisterBuffers2(device_data->handle, 0, 0,
+-                                    device_data->vbuf, 2, &vattr, 0, NULL)) {
+-        return SDL_SetError("sceVideoOutRegisterBuffers2: %s", strerror(errno));
++    if(PS5_Tilemap_BufferSize(mode->w, mode->h) > PS5_VIDEOOUT_MEMSIZE / 2) {
++        return SDL_SetError("%dx%d does not fit in the video buffers",
++                            mode->w, mode->h);
+     }
+ 
+     surface = SDL_CreateRGBSurfaceWithFormat(0, mode->w, mode->h, 32,
+@@ -182,6 +325,16 @@ static int PS5_SetDisplayMode(_THIS, SDL_VideoDisplay * display,
+     device_data->surface = surface;
+     device_data->tmap = tmap;
+ 
++    /* Register the framebuffers again at the new size, if VideoOut is open;
++       otherwise it is opened at that size when first needed. */
++    if (device_data->handle >= 0) {
++        PS5_VideoOut_CloseHandle(_this);
++        if (PS5_VideoOut_OpenHandle(_this) < 0) {
++            PS5_VideoOut_CloseHandle(_this);
++            return -1;
++        }
++    }
++
+     return 0;
+ }
+ 
+@@ -190,8 +343,6 @@ static int PS5_VideoInit(_THIS)
+     PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
+     SDL_VideoDisplay display;
+     SDL_DisplayMode mode;
+-    PS5_VideoAttr vattr;
+-    void *vaddr = 0;
+ 
+     SDL_zero(mode);
+     mode.format = SDL_PIXELFORMAT_ABGR8888;
+@@ -199,47 +350,7 @@ static int PS5_VideoInit(_THIS)
+     mode.h = 1080;
+     mode.refresh_rate = 60;
+ 
+-    memset(device_data->vbuf, 0, sizeof(device_data->vbuf));
+-    memset(&vattr, 0, sizeof(vattr));
+-
+     sceSystemServiceHideSplashScreen();
+-    device_data->handle = sceVideoOutOpen(0xff, 0, 0, NULL);
+-    if (device_data->handle < 0) {
+-        return SDL_SetError("sceVideoOutOpen: %s", strerror(errno));
+-    }
+-    device_data->memsize = 0x4000000;
+-    if (sceKernelAllocateMainDirectMemory(device_data->memsize, 0x20000, 3,
+-                                          &device_data->paddr)) {
+-        return SDL_SetError("sceKernelAllocateMainDirectMemory: %s",
+-                            strerror(errno));
+-    }
+-
+-    if (sceKernelMapDirectMemory(&vaddr, device_data->memsize, 0x33, 0,
+-                                 device_data->paddr, 0x20000)) {
+-        return SDL_SetError("sceKernelMapDirectMemory: %s", strerror(errno));
+-    }
+-
+-    device_data->vbuf[0].data = vaddr;
+-    device_data->vbuf[1].data = vaddr + (device_data->memsize / 2);
+-
+-    if (sceKernelCreateEqueue(&device_data->evt_queue, "flip queue")) {
+-        return SDL_SetError("sceKernelCreateEqueue: %s", strerror(errno));
+-    }
+-
+-    if (sceVideoOutAddFlipEvent(device_data->evt_queue, device_data->handle, 0)) {
+-        return SDL_SetError("sceVideoOutAddFlipEvent: %s", strerror(errno));
+-    }
+-    if (sceVideoOutSetFlipRate(device_data->handle, 0)) {
+-        return SDL_SetError("sceVideoOutSetFlipRate: %s", strerror(errno));
+-    }
+-
+-    sceVideoOutSetBufferAttribute2(&vattr, 0x8000000022000000UL, 0,
+-                                   mode.w, mode.h, 0, 0, 0);
+-
+-    if (sceVideoOutRegisterBuffers2(device_data->handle, 0, 0,
+-                                    device_data->vbuf, 2, &vattr, 0, NULL)) {
+-        return SDL_SetError("sceVideoOutRegisterBuffers2: %s", strerror(errno));
+-    }
+ 
+     device_data->surface = SDL_CreateRGBSurfaceWithFormat(0, mode.w, mode.h, 32,
+                                                           mode.format);
+@@ -247,15 +358,15 @@ static int PS5_VideoInit(_THIS)
+         return -1;
+     }
+ 
+-    SDL_zero(display);
+-    display.desktop_mode = mode;
+-    display.current_mode = mode;
+-
+     device_data->tmap = PS5_Tilemap_Create(mode.w, mode.h);
+     if(!device_data->tmap) {
+         return SDL_OutOfMemory();
+     }
+ 
++    SDL_zero(display);
++    display.desktop_mode = mode;
++    display.current_mode = mode;
++
+     SDL_AddVideoDisplay(&display, SDL_FALSE);
+ 
+     return 0;
+@@ -265,19 +376,10 @@ static void PS5_VideoQuit(_THIS)
+ {
+     PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
+ 
+-    if (device_data->handle != 0) {
+-        sceVideoOutClose(device_data->handle);
+-        device_data->handle = 0;
+-    }
++    PS5_VideoOut_Release(_this);
+ 
+-    if (device_data->paddr) {
+-        sceKernelReleaseDirectMemory(device_data->paddr, device_data->memsize);
+-        device_data->paddr = 0;
+-        device_data->memsize = 0;
+-    }
+-    if (device_data->evt_queue) {
+-        sceKernelDeleteEqueue(device_data->evt_queue);
+-    }
++    SDL_FreeSurface(device_data->surface);
++    device_data->surface = NULL;
+ 
+     PS5_Tilemap_Destroy(device_data->tmap);
+     device_data->tmap = NULL;
+@@ -285,9 +387,53 @@ static void PS5_VideoQuit(_THIS)
+ 
+ static int PS5_CreateWindow(_THIS, SDL_Window *window)
+ {
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++    SDL_WindowData *data;
++
++    data = (SDL_WindowData *)SDL_calloc(1, sizeof(SDL_WindowData));
++    if (!data) {
++        return SDL_OutOfMemory();
++    }
++    window->driverdata = data;
++
++    /* OpenGL on EGL and Vulkan draw to the whole screen, at the resolution
++       of Mesa's swapchain, whatever size was asked for. */
++    if ((window->flags & (SDL_WINDOW_OPENGL | SDL_WINDOW_VULKAN)) &&
++        device_data->gpu_output) {
++        window->x = window->windowed.x = 0;
++        window->y = window->windowed.y = 0;
++        window->w = window->windowed.w = PS5_GPU_OUTPUT_WIDTH;
++        window->h = window->windowed.h = PS5_GPU_OUTPUT_HEIGHT;
++    }
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++    if (window->flags & SDL_WINDOW_OPENGL) {
++        if (PS5_EGL_CreateWindowSurface(_this, window) < 0) {
++            return -1;
++        }
++    }
++#endif
++
+     return 0;
+ }
+ 
++#if defined(SDL_VIDEO_OPENGL_EGL) || defined(SDL_VIDEO_VULKAN)
++/* OpenGL and Vulkan draw to Mesa's swapchain, whatever size the window was
++   later given. */
++static void PS5_GetDrawableSize(_THIS, SDL_Window *window, int *w, int *h)
++{
++    PS5_DeviceData *device_data = (PS5_DeviceData *)_this->driverdata;
++
++    if ((window->flags & (SDL_WINDOW_OPENGL | SDL_WINDOW_VULKAN)) &&
++        device_data->gpu_output) {
++        *w = PS5_GPU_OUTPUT_WIDTH;
++        *h = PS5_GPU_OUTPUT_HEIGHT;
++    } else {
++        SDL_GetWindowSize(window, w, h);
++    }
++}
++#endif
++
+ static void PS5_DestroyDevice(SDL_VideoDevice *device)
+ {
+     SDL_free(device->driverdata);
+@@ -296,6 +442,18 @@ static void PS5_DestroyDevice(SDL_VideoDevice *device)
+ 
+ static void PS5_DestroyWindow(_THIS, SDL_Window *window)
+ {
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++
++    if (!data) {
++        return;
++    }
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++    PS5_EGL_DestroyWindowSurface(_this, window);
++#endif
++
++    SDL_free(data);
++    window->driverdata = NULL;
+ }
+ 
+ static void PS5_PumpEvents(_THIS)
+@@ -307,6 +465,7 @@ static void PS5_PumpEvents(_THIS)
+ static SDL_VideoDevice *PS5_CreateDevice(void)
+ {
+     SDL_VideoDevice *device;
++    PS5_DeviceData *device_data;
+ 
+     device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(SDL_VideoDevice));
+     if (device == NULL) {
+@@ -314,12 +473,13 @@ static SDL_VideoDevice *PS5_CreateDevice(void)
+         return NULL;
+     }
+ 
+-    device->driverdata = SDL_calloc(1, sizeof(PS5_DeviceData));
++    device->driverdata = device_data = SDL_calloc(1, sizeof(PS5_DeviceData));
+     if (device->driverdata == NULL) {
+         SDL_free(device);
+         SDL_OutOfMemory();
+         return NULL;
+     }
++    device_data->handle = -1;
+ 
+     PS5_Remote_Init();
+     PS5_Keyboard_Init();
+@@ -341,8 +501,17 @@ static SDL_VideoDevice *PS5_CreateDevice(void)
+     device->IsScreenKeyboardShown = PS5_IsScreenKeyboardShown;
+     device->free = PS5_DestroyDevice;
+ 
+-#ifdef SDL_VIDEO_OPENGL_OSMESA
+-    PS5_OSMesa_InitDevice(device);
++#ifdef SDL_VIDEO_OPENGL_EGL
++    PS5_GL_InitDevice(device);
++    device->GL_GetDrawableSize = PS5_GetDrawableSize;
++#endif
++
++#ifdef SDL_VIDEO_VULKAN
++    device->Vulkan_LoadLibrary = PS5_Vulkan_LoadLibrary;
++    device->Vulkan_UnloadLibrary = PS5_Vulkan_UnloadLibrary;
++    device->Vulkan_GetInstanceExtensions = PS5_Vulkan_GetInstanceExtensions;
++    device->Vulkan_CreateSurface = PS5_Vulkan_CreateSurface;
++    device->Vulkan_GetDrawableSize = PS5_GetDrawableSize;
+ #endif
+ 
+     return device;
+diff --git a/src/video/ps5/SDL_ps5video.h b/src/video/ps5/SDL_ps5video.h
+index bc0a5f0..dc5dd06 100644
+--- a/src/video/ps5/SDL_ps5video.h
++++ b/src/video/ps5/SDL_ps5video.h
+@@ -38,8 +38,16 @@ typedef struct PS5_VideoAttr {
+     uint8_t junk0[80];
+ } PS5_VideoAttr;
+ 
++/* The resolution Mesa's VideoOut WSI scans out (VIDEOOUT_WIDTH and
++ * VIDEOOUT_HEIGHT in wsi_common_videoout.c and platform_videoout.c): every
++ * OpenGL (EGL) and Vulkan window surface has this size. */
++#define PS5_GPU_OUTPUT_WIDTH  3840
++#define PS5_GPU_OUTPUT_HEIGHT 2160
++
+ typedef struct PS5_DeviceData
+ {
++    /* VideoOut as SDL drives it for window framebuffers, opened on first
++       use (-1 when closed) so that Mesa can have it instead. */
+     int handle;
+     PS5_VideoBuf vbuf[2];
+     struct kevent *evt_queue;
+@@ -47,8 +55,25 @@ typedef struct PS5_DeviceData
+     size_t memsize;
+     SDL_Surface *surface;
+     PS5_Tilemap* tmap;
++
++    /* Mesa's VideoOut WSI drives the display (OpenGL through EGL, or
++       Vulkan): SDL has handed VideoOut over and never opens it again, as
++       Mesa holds it until the process exits. */
++    SDL_bool gpu_output;
+ } PS5_DeviceData;
+ 
++typedef struct SDL_WindowData
++{
++    void *egl_surface; /* EGLSurface of an OpenGL window on EGL */
++} SDL_WindowData;
++
++/* Closes SDL's VideoOut handle and frees its framebuffers, if open. */
++void PS5_VideoOut_Release(_THIS);
++
++/* Hands the display to Mesa's VideoOut WSI: closes SDL's VideoOut and
++   reports the WSI's resolution as the display's only mode. */
++void PS5_UseGPUOutput(_THIS);
++
+ int sceSystemServiceHideSplashScreen(void);
+ 
+ int sceKernelAllocateMainDirectMemory(size_t, size_t, int, intptr_t*);
+diff --git a/src/video/ps5/SDL_ps5vulkan.c b/src/video/ps5/SDL_ps5vulkan.c
+new file mode 100644
+index 0000000..8cff381
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5vulkan.c
+@@ -0,0 +1,156 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#if defined(SDL_VIDEO_VULKAN) && defined(SDL_VIDEO_DRIVER_PS5)
++
++/*
++ * Vulkan on Mesa's RADV, which is the console's libvulkan.so.1 (there is no
++ * loader). Window surfaces are VK_KHR_display surfaces on the one display,
++ * VideoOut, through RADV's VideoOut WSI: 3840x2160, FIFO.
++ */
++
++#include "SDL_loadso.h"
++#include "SDL_ps5video.h"
++#include "SDL_ps5vulkan.h"
++
++#define DEFAULT_VULKAN "libvulkan.so.1"
++
++int PS5_Vulkan_LoadLibrary(_THIS, const char *path)
++{
++    VkExtensionProperties *extensions = NULL;
++    Uint32 i, extensionCount = 0;
++    SDL_bool hasSurfaceExtension = SDL_FALSE;
++    SDL_bool hasDisplayExtension = SDL_FALSE;
++    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = NULL;
++
++    if (_this->vulkan_config.loader_handle) {
++        return SDL_SetError("Vulkan already loaded");
++    }
++
++    if (!path) {
++        path = SDL_getenv("SDL_VULKAN_LIBRARY");
++    }
++    if (!path) {
++        path = DEFAULT_VULKAN;
++    }
++
++    /* RADV's WSI opens VideoOut for its swapchains: SDL must have let it go. */
++    PS5_VideoOut_Release(_this);
++
++    _this->vulkan_config.loader_handle = SDL_LoadObject(path);
++    if (!_this->vulkan_config.loader_handle) {
++        return -1;
++    }
++    SDL_strlcpy(_this->vulkan_config.loader_path, path,
++                SDL_arraysize(_this->vulkan_config.loader_path));
++
++    vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)SDL_LoadFunction(
++        _this->vulkan_config.loader_handle, "vkGetInstanceProcAddr");
++    if (!vkGetInstanceProcAddr) {
++        goto fail;
++    }
++    _this->vulkan_config.vkGetInstanceProcAddr = (void *)vkGetInstanceProcAddr;
++    _this->vulkan_config.vkEnumerateInstanceExtensionProperties =
++        (void *)vkGetInstanceProcAddr(VK_NULL_HANDLE,
++                                      "vkEnumerateInstanceExtensionProperties");
++    if (!_this->vulkan_config.vkEnumerateInstanceExtensionProperties) {
++        SDL_SetError("vkEnumerateInstanceExtensionProperties not found in %s", path);
++        goto fail;
++    }
++
++    extensions = SDL_Vulkan_CreateInstanceExtensionsList(
++        (PFN_vkEnumerateInstanceExtensionProperties)
++            _this->vulkan_config.vkEnumerateInstanceExtensionProperties,
++        &extensionCount);
++    if (!extensions) {
++        goto fail;
++    }
++    for (i = 0; i < extensionCount; i++) {
++        if (SDL_strcmp(VK_KHR_SURFACE_EXTENSION_NAME, extensions[i].extensionName) == 0) {
++            hasSurfaceExtension = SDL_TRUE;
++        } else if (SDL_strcmp(VK_KHR_DISPLAY_EXTENSION_NAME, extensions[i].extensionName) == 0) {
++            hasDisplayExtension = SDL_TRUE;
++        }
++    }
++    SDL_free(extensions);
++
++    if (!hasSurfaceExtension) {
++        SDL_SetError("Installed Vulkan doesn't implement the " VK_KHR_SURFACE_EXTENSION_NAME " extension");
++        goto fail;
++    } else if (!hasDisplayExtension) {
++        SDL_SetError("Installed Vulkan doesn't implement the " VK_KHR_DISPLAY_EXTENSION_NAME " extension");
++        goto fail;
++    }
++
++    PS5_UseGPUOutput(_this);
++
++    return 0;
++
++fail:
++    SDL_UnloadObject(_this->vulkan_config.loader_handle);
++    _this->vulkan_config.loader_handle = NULL;
++    return -1;
++}
++
++void PS5_Vulkan_UnloadLibrary(_THIS)
++{
++    if (_this->vulkan_config.loader_handle) {
++        SDL_UnloadObject(_this->vulkan_config.loader_handle);
++        _this->vulkan_config.loader_handle = NULL;
++    }
++}
++
++SDL_bool PS5_Vulkan_GetInstanceExtensions(_THIS,
++                                          SDL_Window *window,
++                                          unsigned *count,
++                                          const char **names)
++{
++    static const char *const extensionsForPS5[] = {
++        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_DISPLAY_EXTENSION_NAME
++    };
++
++    if (!_this->vulkan_config.loader_handle) {
++        SDL_SetError("Vulkan is not loaded");
++        return SDL_FALSE;
++    }
++
++    return SDL_Vulkan_GetInstanceExtensions_Helper(
++        count, names, SDL_arraysize(extensionsForPS5), extensionsForPS5);
++}
++
++SDL_bool PS5_Vulkan_CreateSurface(_THIS,
++                                  SDL_Window *window,
++                                  VkInstance instance,
++                                  VkSurfaceKHR *surface)
++{
++    if (!_this->vulkan_config.loader_handle) {
++        SDL_SetError("Vulkan is not loaded");
++        return SDL_FALSE;
++    }
++
++    return SDL_Vulkan_Display_CreateSurface(_this->vulkan_config.vkGetInstanceProcAddr,
++                                            instance, surface);
++}
++
++#endif
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5vulkan.h b/src/video/ps5/SDL_ps5vulkan.h
+new file mode 100644
+index 0000000..04fbb2b
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5vulkan.h
+@@ -0,0 +1,46 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#ifndef SDL_ps5vulkan_h_
++#define SDL_ps5vulkan_h_
++
++#include "../SDL_vulkan_internal.h"
++#include "../SDL_sysvideo.h"
++
++#if defined(SDL_VIDEO_VULKAN) && defined(SDL_VIDEO_DRIVER_PS5)
++
++int PS5_Vulkan_LoadLibrary(_THIS, const char *path);
++void PS5_Vulkan_UnloadLibrary(_THIS);
++SDL_bool PS5_Vulkan_GetInstanceExtensions(_THIS,
++                                          SDL_Window *window,
++                                          unsigned *count,
++                                          const char **names);
++SDL_bool PS5_Vulkan_CreateSurface(_THIS,
++                                  SDL_Window *window,
++                                  VkInstance instance,
++                                  VkSurfaceKHR *surface);
++
++#endif
++
++#endif /* SDL_ps5vulkan_h_ */
++
++/* vi: set ts=4 sw=4 expandtab: */
