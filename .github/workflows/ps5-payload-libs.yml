@@ -22,9 +22,13 @@ jobs:
       run: |
         sudo apt update
         sudo apt install cmake pkg-config meson clang-18 lld-18
+        sudo apt install llvm-18-dev libclang-18-dev libclang-cpp18-dev
+        sudo apt install libclc-18-dev libllvmspirvlib-18-dev
         sudo apt install build-essential autoconf libtool yasm nasm bison flex
         sudo apt install smpq gperf pkgconf libarchive-tools autopoint po4a git curl doxygen
         sudo apt install makepkg pacman-package-manager python3-mako python3-glad
+        sudo apt install spirv-tools glslang-tools python3-packaging
+        sudo python3 -m pip install --break-system-packages 'meson>=1.4.0'
 
     - name: Build artifacts
       run: bash ci-libs.sh
