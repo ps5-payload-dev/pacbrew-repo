@@ -1,12 +1,12 @@
 pkgname=ps5-payload-libmad
-pkgver=0.16.4
+pkgver=0.16.5
 pkgrel=1
 pkgdesc="A high-quality MPEG audio decoder"
 arch=('any')
 url="https://www.underbit.com/products/mad/"
 license=('GPL')
 source=("https://codeberg.org/tenacityteam/libmad/releases/download/${pkgver}/libmad-${pkgver}.tar.gz")
-sha256sums=('0f6bfb36c554075494b5fc2c646d08de7364819540f23bab30ae73fa1b5cfe65')
+sha256sums=('f401b2ccf49c26ad0c3a6ef0179b1cbbff2406338b0603bb2033e6dcaf706114')
 options=(!strip libtool staticlibs)
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-sdk' 'ps5-payload-libcxx')
@@ -20,10 +20,11 @@ prepare() {
 
 build() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd libmad
+    cd mad-${pkgver}-source
 
     ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DEXAMPLE=OFF \
 	    -B build \
         -S .
     ${MAKE} -C build
@@ -31,7 +32,7 @@ build() {
 
 package() {
     source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
-    cd libmad
+    cd mad-${pkgver}-source
 
     export DESTDIR="${pkgdir}/${DESTDIR}"
     ${MAKE} -C build install
