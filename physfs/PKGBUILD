@@ -1,0 +1,48 @@
+pkgname=ps5-payload-physfs
+pkgver=3.2.0
+pkgrel=1
+pkgdesc='Portable and flexible I/O abstraction for archives'
+arch=('any')
+url='https://icculus.org/physfs'
+license=('zlib')
+options=(!strip libtool staticlibs)
+source=("https://github.com/icculus/physfs/archive/refs/tags/release-$pkgver.tar.gz"
+        "0001-PS5_Support.patch")
+sha256sums=('1991500eaeb8d5325e3a8361847ff3bf8e03ec89252b7915e1f25b3f8ab5d560'
+            'b76af0fca8dd6b11230a82572ccc4ecb4ac5ef207e715b8c0255e9305ea3e7a1')
+groups=('ps5-payload-dev')
+makedepends=('ps5-payload-sdk')
+depends=('ps5-payload-libcxx')
+
+prepare() {
+    if [ -z "${PS5_PAYLOAD_SDK}" ]; then
+        export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+    fi
+
+    cd physfs-release-${pkgver}
+    patch -Np1 -i "${srcdir}/0001-PS5_Support.patch"
+}
+
+build() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd physfs-release-${pkgver}
+
+    ${CMAKE} -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DPHYSFS_BUILD_DOCS=OFF \
+        -DPHYSFS_BUILD_SHARED=OFF \
+        -DPHYSFS_BUILD_TEST=OFF \
+        -B build \
+        -S .
+    ${MAKE} -C build
+}
+
+package() {
+    source "${PS5_PAYLOAD_SDK}/toolchain/prospero.sh"
+    cd physfs-release-${pkgver}
+
+    export DESTDIR="${pkgdir}/${DESTDIR}"
+    ${MAKE} -C build install
+
+    ${PS5_CROSS_FIX_ROOT} "${DESTDIR}/${PREFIX}"
+}
