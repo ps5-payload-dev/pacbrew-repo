@@ -1,14 +1,20 @@
 pkgname=ps5-payload-json-c
 pkgver=0.19
 _date=20260627
-pkgrel=1
+pkgrel=2
 pkgdesc="A JSON implementation in C"
 url="https://github.com/json-c/json-c/wiki"
 license=('MIT')
 arch=('any')
 options=(!strip libtool staticlibs)
-source=("https://github.com/json-c/json-c/releases/download/json-c-${pkgver}-${_date}/json-c-${pkgver}.tar.gz")
-sha256sums=('37ad0249902e301bd9052bf712e511fcc6acff4ecaad4b5900aad9ce564e26de')
+source=("https://github.com/json-c/json-c/releases/download/json-c-${pkgver}-${_date}/json-c-${pkgver}.tar.gz"
+	0001-free-objects-outside-assert-in-json_object_put.patch
+	0002-Issue-934-Also-set-_userdata-NULL-in-_json_object_ma.patch
+	0003-fix-json_object_put-to-return-1-for-freed-scalars-an.patch)
+sha256sums=('37ad0249902e301bd9052bf712e511fcc6acff4ecaad4b5900aad9ce564e26de'
+            '29aa0916bc99d0af7f95bda1a1d10d6c5f8a7559e9a114f5b7584f8f9f8386a0'
+            '0c00239ebd63940b8b0c2ed0d0af09b0e63c3156c5ceeb5832ca948d5950a609'
+            '1cc50d00c56b7cd96197c2ccc369e2ffaa2fb9a369b673f263032d151377059e')
 groups=('ps5-payload-dev')
 makedepends=('ps5-payload-openlibm')
 depends=('ps5-payload-sdk')
@@ -17,6 +23,12 @@ prepare() {
     if [ -z "${PS5_PAYLOAD_SDK}" ]; then
 	export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
     fi
+    # Backport v0.19 memory leak patches (copied from Alpine)
+    # See alpinelinux/aports@1db62b9c8587ddc66a5d404ebc4ddb139f161416
+    cd json-c-${pkgver}
+    patch -Np1 -i ../0001-free-objects-outside-assert-in-json_object_put.patch
+    patch -Np1 -i ../0002-Issue-934-Also-set-_userdata-NULL-in-_json_object_ma.patch
+    patch -Np1 -i ../0003-fix-json_object_put-to-return-1-for-freed-scalars-an.patch
 }
 
 build() {
